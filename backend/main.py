@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import os
 from dotenv import load_dotenv
 
@@ -11,7 +11,7 @@ app = FastAPI(title="プログラミング学習支援システム API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174", "http://localhost:5175"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -21,58 +21,121 @@ app.add_middleware(
 # --- Data models ---
 
 class Condition(BaseModel):
-    type: str  # "div3" | "div5" | "always"
+    type: str  # "person_sensor" | "dark_sensor"
 
 
 class Rule(BaseModel):
     id: str
     conditions: List[Condition]
-    action: str  # "fizz" | "buzz" | "fizzbuzz" | "number"
+    action: str  # "door" | "bell"
 
 
 class Environment(BaseModel):
-    n: int  # input number
+    personPresent: bool
+    isDark: bool
 
 
 class SimulationResult(BaseModel):
-    output: str        # actual output from the learner's program
-    expected: str      # correct FizzBuzz output
-    is_correct: bool
+    doorOpen: bool
+    bellRinging: bool
+    doorCorrect: bool
+    bellCorrect: bool
+    allCorrect: bool
+
+
+class ChatMessage(BaseModel):
+    role: str   # "user" | "ai"
+    text: str
 
 
 class AdviceRequest(BaseModel):
     rules: List[Rule]
     environment: Environment
     result: SimulationResult
+    history: Optional[List[ChatMessage]] = []
+    phase: Optional[int] = 2  # 2=pair, 3=verify, 4=group
 
 
 # --- Prompt construction ---
 
-SYSTEM_PROMPT = """\
-あなたはプログラミング教育をサポートするAIメンターです。
-学習者が「FizzBuzz」問題に取り組んでいます。
+SYSTEM_PROMPT_BASE = """\
+あなたはプログラミング教育をサポートするAIです。
+学習者が「コンビニエンスストアの入り口制御プログラム」に取り組んでいます。
 
-【問題文】
-整数 N が与えられたとき、以下のルールに従って出力せよ。
-  1. N が 3 の倍数 かつ 5 の倍数 → "FizzBuzz" を出力
-  2. N が 3 の倍数              → "Fizz" を出力
-  3. N が 5 の倍数              → "Buzz" を出力
-  4. それ以外                   → N をそのまま出力
+【課題】
+コンビニの入り口に設置されたセンサーを使って、以下のルールを満たすプログラムを作ってください。
+  ・人が来たら → 自動ドアを開ける（昼夜問わず）
+  ・夜に人が来たら → チャイムを鳴らす（昼は鳴らさない）
 
-【ブロックの仕様】
-・条件ブロック: 「3の倍数」「5の倍数」「常に（else）」
-・ルールは上から順に評価し、最初に条件が全て一致したルールのアクションを実行する（if-elif-else 方式）
+【使えるセンサー（条件）】
+  ・人感センサーON → 人がいる
+  ・明るさセンサーON → 夜（暗い）
 
-【あなたの役割】
-学習者のプログラムに論理的な誤りや不足がある場合、正解を直接教えず、
-ソクラテス式の問いかけで学習者自身が気づけるよう優しく誘導してください。
+【使えるアクション】
+  ・ドアを開ける / チャイムを鳴らす
 
-【厳守ルール】
-1. 絶対に正解のコードや正しいルール順を直接教えない
+【複数ルールの動作】
+  全てのルールを評価し、条件を満たすルールのアクションを全て実行する。
+
+【共通ルール】
+1. 正解のルール構成を直接教えない
 2. 問いかけは 1〜2 個に絞る
 3. 学習者を励ます言葉を添える
-4. プログラムが正しい場合は素直に称賛する
+4. 全シナリオ正解なら素直に称賛する
+5. 会話の流れを踏まえて前の返答に応じた反応をする
 """
+
+SYSTEM_PROMPT_PHASE2 = SYSTEM_PROMPT_BASE + """
+【あなたの役割：ペアの友達】
+今は「ペアで対話する」フェーズです。あなたは学習者のペアの友達として振る舞ってください。
+
+・自分もプログラムを考えていた友達として、お互いの考えを比べるように話す
+・「私はこう考えたんだけど、あなたは？」「そこ、なんでそうしたの？」のような自然な対話スタイル
+・学習者のプログラムと自分の（架空の）考えを比較して、違いや疑問を投げかける
+・間違いを指摘するのではなく、「あれ、これだとどうなる？」と一緒に考える姿勢で
+"""
+
+SYSTEM_PROMPT_PHASE3 = SYSTEM_PROMPT_BASE + """
+【あなたの役割：確認のサポーター】
+今は「実際にプログラムを動かして確認する」フェーズです。
+
+・4つのシナリオ（昼夜×人あり/なし）を順番に確認するよう促す
+・「このシナリオでは正しく動いた？」「他のパターンも試してみた？」と確認を促す
+・シミュレーション結果を見ながら、なぜそうなるのかを一緒に考える
+"""
+
+SYSTEM_PROMPT_PHASE4 = SYSTEM_PROMPT_BASE + """
+【あなたの役割：全体対話のファシリテーター】
+今は「全体で対話する」フェーズです。クラス全員が集まって話し合う場を演出してください。
+
+・他のグループが作った（架空の）プログラムを提示して、それについて意見を求める
+・以下の典型的な間違いパターンを使って議論を促す：
+
+  パターンA（ベルに人感センサーなし）:
+    「夜だから暗い → チャイムを鳴らす」というプログラムを作ったグループがあったよ。
+    これ、どんな問題があると思う？
+
+  パターンB（ドアに夜条件が入っている）:
+    「夜に人が来たら → ドアを開ける」というルールを作ったグループがいたよ。
+    昼間はどうなっちゃうと思う？
+
+  パターンD（直列になっている）:
+    「ドアが開いたら → チャイムが鳴る」という考えのグループもいたよ。
+    これだと実際のコンビニでどういうことが起きそう？
+
+・他者のプログラムを批判的に検討することで、自分のプログラムも見直すよう促す
+・「あなたのプログラムはこのパターンと違う？どこが違う？」と比較させる
+"""
+
+
+def get_system_prompt(phase: int) -> str:
+    if phase == 2:
+        return SYSTEM_PROMPT_PHASE2
+    elif phase == 3:
+        return SYSTEM_PROMPT_PHASE3
+    elif phase == 4:
+        return SYSTEM_PROMPT_PHASE4
+    return SYSTEM_PROMPT_PHASE2
 
 
 def describe_rules(rules: List[Rule]) -> str:
@@ -80,15 +143,12 @@ def describe_rules(rules: List[Rule]) -> str:
         return "（ルールが設定されていません）"
 
     cond_labels = {
-        "div3": "3の倍数",
-        "div5": "5の倍数",
-        "always": "常に（else）",
+        "person_sensor": "人感センサーON",
+        "dark_sensor": "明るさセンサーON（夜）",
     }
     action_labels = {
-        "fizz": '"Fizz" を出力',
-        "buzz": '"Buzz" を出力',
-        "fizzbuzz": '"FizzBuzz" を出力',
-        "number": "N をそのまま出力",
+        "door": "ドアを開ける",
+        "bell": "チャイムを鳴らす",
     }
 
     lines = []
@@ -101,23 +161,55 @@ def describe_rules(rules: List[Rule]) -> str:
     return "\n".join(lines)
 
 
+def describe_scenarios(rules: List[Rule]) -> str:
+    scenarios = [
+        {"label": "昼・人あり",  "personPresent": True,  "isDark": False},
+        {"label": "昼・人なし",  "personPresent": False, "isDark": False},
+        {"label": "夜・人あり",  "personPresent": True,  "isDark": True},
+        {"label": "夜・人なし",  "personPresent": False, "isDark": True},
+    ]
+
+    lines = []
+    for s in scenarios:
+        conds = {"person_sensor": s["personPresent"], "dark_sensor": s["isDark"]}
+        door = False
+        bell = False
+        for rule in rules:
+            if rule.conditions and all(conds.get(c.type, False) for c in rule.conditions):
+                if rule.action == "door":
+                    door = True
+                elif rule.action == "bell":
+                    bell = True
+
+        door_correct = door == s["personPresent"]
+        bell_correct = bell == (s["personPresent"] and s["isDark"])
+        status = "✓" if (door_correct and bell_correct) else "✗"
+        lines.append(
+            f"  {s['label']}: ドア={'開' if door else '閉'} / チャイム={'鳴る' if bell else '静か'} {status}"
+        )
+    return "\n".join(lines)
+
+
 def build_user_message(req: AdviceRequest) -> str:
     rules_str = describe_rules(req.rules)
-    n = req.environment.n
-    correct_mark = "✓ 正解" if req.result.is_correct else f"✗ 不正解（正解: {req.result.expected}）"
+    scenarios_str = describe_scenarios(req.rules)
+    env_label = f"{'夜' if req.environment.isDark else '昼'} × {'人あり' if req.environment.personPresent else '人なし'}"
 
     return f"""\
-【学習者が作ったプログラム】（ルールは上から順に評価）
+【学習者が作ったプログラム】
 {rules_str}
 
-【テストケース】
-  入力: N = {n}
-  プログラムの出力: {req.result.output}
-  期待される出力: {req.result.expected}
-  判定: {correct_mark}
+【全シナリオのシミュレーション結果】
+{scenarios_str}
 
-このプログラムに論理的な誤りや不足がある場合、学習者が自分で気づけるような問いかけをしてください。
-正しければ称賛してください。
+【現在選択中の環境】
+  {env_label}
+  ドア: {'開いている' if req.result.doorOpen else '閉まっている'} {'（正しい）' if req.result.doorCorrect else '（間違い）'}
+  チャイム: {'鳴っている' if req.result.bellRinging else '静か'} {'（正しい）' if req.result.bellCorrect else '（間違い）'}
+  全体判定: {'✓ 全シナリオ正解' if req.result.allCorrect else '✗ 不正解あり'}
+
+このプログラムに不足や誤りがある場合、学習者が自分で気づけるような問いかけをしてください。
+全シナリオ正解なら称賛してください。
 """
 
 
@@ -125,80 +217,57 @@ def build_user_message(req: AdviceRequest) -> str:
 
 def fallback_response(req: AdviceRequest) -> str:
     rules = req.rules
-    n = req.environment.n
-    result = req.result
 
     if not rules:
         return (
-            "まだルールが1つも設定されていないようですね。"
-            "まず「3の倍数のとき、何を出力すればいいか」から考えてみましょう！"
+            "まだルールが1つも作られていませんね。\n"
+            "コンビニのドアって、どんなときに開くと思いますか？"
         )
 
-    # Check if FizzBuzz rule exists
-    has_fizzbuzz_rule = any(
-        rule.action == "fizzbuzz" or (
-            rule.action == "fizz" and any(c.type == "div5" for c in rule.conditions)
-        )
-        for rule in rules
-    )
+    door_rules = [r for r in rules if r.action == "door"]
+    bell_rules = [r for r in rules if r.action == "bell"]
 
-    fizzbuzz_rules = [r for r in rules if r.action == "fizzbuzz"]
-    fizz_rules = [r for r in rules if r.action == "fizz"]
-    buzz_rules = [r for r in rules if r.action == "buzz"]
-    number_rules = [r for r in rules if r.action == "number"]
+    # ドアのルールに夜条件が入っている
+    if door_rules:
+        for r in door_rules:
+            if any(c.type == "dark_sensor" for c in r.conditions):
+                return (
+                    "ドアのルールに「明るさセンサー」が入っていますね。\n"
+                    "昼間にお客さんが来たとき、ドアはどうなりますか？"
+                )
 
-    # Test n=15 mentally
-    conditions_15 = {"div3": True, "div5": True, "always": True}
-    output_15 = "(なし)"
-    for rule in rules:
-        if all(conditions_15.get(c.type, False) for c in rule.conditions):
-            output_15 = {"fizz": "Fizz", "buzz": "Buzz", "fizzbuzz": "FizzBuzz", "number": "15"}.get(rule.action, "?")
-            break
+    # 人感センサーなしでベルが鳴る
+    if bell_rules:
+        for r in bell_rules:
+            if not any(c.type == "person_sensor" for c in r.conditions):
+                return (
+                    "チャイムのルールに人感センサーが入っていないですね。\n"
+                    "お店に誰もいないのに、夜中ずっとチャイムが鳴ってしまうことはないですか？"
+                )
 
-    # FizzBuzz case mistake: n=15 outputs Fizz or Buzz instead of FizzBuzz
-    if output_15 in ("Fizz", "Buzz") and not fizzbuzz_rules:
+    # ドアのルールがない
+    if not door_rules:
         return (
-            "N = 15 のとき、何が出力されますか？シミュレーションで確かめてみてください。\n"
-            "3の倍数「かつ」5の倍数の場合、Fizz でも Buzz でもなく…という特別なケースがありませんでしたか？"
+            "ドアを開けるルールがまだないようですね。\n"
+            "お客さんが来たとき、ドアはどうなってほしいですか？"
         )
 
-    # FizzBuzz rule exists but order is wrong (div3→Fizz comes before div3 AND div5→FizzBuzz)
-    if fizzbuzz_rules and fizz_rules:
-        fizzbuzz_idx = min(rules.index(r) for r in fizzbuzz_rules)
-        fizz_idx = min(rules.index(r) for r in fizz_rules)
-        if fizz_idx < fizzbuzz_idx:
-            return (
-                "ルールは「上から順に」評価されます。\n"
-                "N = 15 のとき、「3の倍数」ルールと「FizzBuzz」ルール、どちらが先に判定されますか？"
-            )
-
-    if not buzz_rules:
+    # ベルのルールがない
+    if not bell_rules:
         return (
-            "「Fizz」のルールはできていますね！\n"
-            "では、5の倍数のときはどうなりますか？N = 5 でシミュレーションしてみましょう。"
+            "ドアのルールは作れていますね！\n"
+            "課題には「夜だけチャイムが鳴る」という条件もありましたね。どうすれば夜だけ鳴るようにできますか？"
         )
 
-    if not fizzbuzz_rules:
+    if req.result.allCorrect:
         return (
-            "3の倍数と5の倍数のルールは作れていますね。\n"
-            "では N = 15 のとき、何が出力されますか？問題文に「3の倍数かつ5の倍数」のときの特別なルールがありませんでしたか？"
-        )
-
-    if not number_rules:
-        return (
-            "FizzBuzz・Fizz・Buzz のルールはできています！\n"
-            "N = 1 のようにどの倍数でもない数のとき、何が出力されるべきでしょうか？"
-        )
-
-    if result.is_correct:
-        return (
-            f"N = {n} の結果が正しいですね！素晴らしい！\n"
-            "他のテストケース（1, 3, 5, 15, 30 など）でも全て正しく動くか確かめてみましょう。"
+            "4つ全てのシナリオで正しく動いていますね！素晴らしい！\n"
+            "「昼・人あり」「夜・人あり」「昼・人なし」「夜・人なし」、どれも確認できましたか？"
         )
 
     return (
-        "いい感じにルールが揃ってきました！\n"
-        "N = 1, 3, 5, 15, 30 の5パターン全部で正しい出力になるか確認してみましょう。"
+        "いい感じになってきました！\n"
+        "4つのシナリオ（昼夜×人あり/なし）を全部チェックして、おかしな動きがないか確かめてみましょう。"
     )
 
 
@@ -213,13 +282,23 @@ async def get_advice(req: AdviceRequest):
             from openai import AsyncOpenAI
 
             client = AsyncOpenAI(api_key=api_key)
+
+            messages = [{"role": "system", "content": get_system_prompt(req.phase or 2)}]
+
+            # 過去の会話履歴を含める
+            if req.history:
+                for msg in req.history[-6:]:  # 直近6件
+                    messages.append({
+                        "role": "user" if msg.role == "user" else "assistant",
+                        "content": msg.text,
+                    })
+
+            messages.append({"role": "user", "content": build_user_message(req)})
+
             response = await client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": build_user_message(req)},
-                ],
-                max_tokens=300,
+                messages=messages,
+                max_tokens=350,
                 temperature=0.7,
             )
             return {"message": response.choices[0].message.content}

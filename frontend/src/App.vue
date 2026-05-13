@@ -1,25 +1,79 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
+
+// ─────────────────────────────────────────────
+// フェーズ管理
+// ─────────────────────────────────────────────
+const PHASES = [
+  {
+    id: 1,
+    label: '1人で考える',
+    desc: 'まずは自分でプログラムを組み立ててみよう。センサーとアクションを組み合わせてルールを作ってください。',
+    showChat: false,
+  },
+  {
+    id: 2,
+    label: 'ペアで対話する',
+    desc: 'AIをペアの友達として、お互いのプログラムについて話し合おう。「なぜそうしたの？」を伝え合ってみよう。',
+    showChat: true,
+  },
+  {
+    id: 3,
+    label: '実行して確認する',
+    desc: '4つのシナリオ（昼夜×人あり/なし）を全部シミュレーションして、正しく動くか確認しよう。',
+    showChat: true,
+  },
+  {
+    id: 4,
+    label: '全体で対話する',
+    desc: 'AIがクラスの他のグループのプログラムを紹介してくれるよ。それについて意見を言ってみよう。',
+    showChat: true,
+  },
+]
+
+const currentPhase = ref(1)
+const currentPhaseData = computed(() => PHASES[currentPhase.value - 1])
+
+const PHASE_INTRO_MESSAGES = {
+  2: 'こんにちは！ペアの対話フェーズだね。\nあなたのプログラム、どんなルールにした？私のと比べてみたいな。教えてくれる？',
+  3: '実行して確認するフェーズだよ！\n4つの場面（昼・人あり、昼・人なし、夜・人あり、夜・人なし）を全部チェックしてみよう。全部✓になるかな？',
+  4: 'みんなのプログラムが出揃ったところで、全体で話し合おう！\n他のグループが作ったプログラムを紹介するね。まず「今のプログラムについてアドバイスをもらう」ボタンを押してみて。',
+}
+
+function advancePhase() {
+  if (currentPhase.value >= 4) return
+  const next = currentPhase.value + 1
+  currentPhase.value = next
+  if (PHASE_INTRO_MESSAGES[next]) {
+    chatMessages.value.push({
+      id: Date.now(),
+      role: 'ai',
+      text: PHASE_INTRO_MESSAGES[next],
+    })
+    nextTick(() => chatEndRef.value?.scrollIntoView({ behavior: 'smooth' }))
+  }
+}
 
 // ─────────────────────────────────────────────
 // 定数
 // ─────────────────────────────────────────────
 const CONDITION_OPTIONS = [
-  { value: '', label: '-- 条件を選ぶ --' },
-  { value: 'div3', label: '3の倍数（N % 3 == 0）' },
-  { value: 'div5', label: '5の倍数（N % 5 == 0）' },
-  { value: 'always', label: '常に（else）' },
+  { value: 'person_sensor', label: '人感センサーON（人がいる）' },
+  { value: 'dark_sensor',   label: '明るさセンサーON（夜・暗い）' },
 ]
 
 const ACTION_OPTIONS = [
-  { value: '', label: '-- 出力を選ぶ --' },
-  { value: 'fizz', label: '"Fizz" を出力' },
-  { value: 'buzz', label: '"Buzz" を出力' },
-  { value: 'fizzbuzz', label: '"FizzBuzz" を出力' },
-  { value: 'number', label: 'N をそのまま出力' },
+  { value: 'door', label: 'ドアを開ける' },
+  { value: 'bell', label: 'チャイムを鳴らす' },
 ]
 
-const PRESET_NUMBERS = [1, 3, 5, 9, 15, 30]
+// 確認する全シナリオ
+const SCENARIOS = [
+  { label: '昼・人あり', personPresent: true,  isDark: false },
+  { label: '昼・人なし', personPresent: false, isDark: false },
+  { label: '夜・人あり', personPresent: true,  isDark: true  },
+  { label: '夜・人なし', personPresent: false, isDark: true  },
+]
 
 // ─────────────────────────────────────────────
 // プログラム構築
@@ -29,8 +83,7 @@ const rules = ref([])
 function addRule() {
   rules.value.push({
     id: Date.now().toString(),
-    cond1: '',
-    cond2: '',
+    conditions: [],
     action: '',
   })
 }
@@ -41,135 +94,135 @@ function removeRule(id) {
 
 function moveUp(index) {
   if (index === 0) return
-  const arr = rules.value
+  const arr = [...rules.value]
   ;[arr[index - 1], arr[index]] = [arr[index], arr[index - 1]]
-  rules.value = [...arr]
+  rules.value = arr
 }
 
 function moveDown(index) {
   if (index === rules.value.length - 1) return
-  const arr = rules.value
+  const arr = [...rules.value]
   ;[arr[index], arr[index + 1]] = [arr[index + 1], arr[index]]
-  rules.value = [...arr]
+  rules.value = arr
 }
 
-// API 送信用フォーマットに変換
+function toggleCondition(rule, condType) {
+  const idx = rule.conditions.findIndex((c) => c.type === condType)
+  if (idx >= 0) {
+    rule.conditions.splice(idx, 1)
+  } else {
+    rule.conditions.push({ type: condType })
+  }
+}
+
+function hasCondition(rule, condType) {
+  return rule.conditions.some((c) => c.type === condType)
+}
+
+// API 送信用フォーマット
 const rulesForApi = computed(() =>
-  rules.value
-    .filter((r) => r.action)
-    .map((r) => ({
-      id: r.id,
-      conditions: [
-        ...(r.cond1 ? [{ type: r.cond1 }] : []),
-        ...(r.cond2 ? [{ type: r.cond2 }] : []),
-      ],
-      action: r.action,
-    }))
+  rules.value.filter((r) => r.action && r.conditions.length > 0)
 )
 
 // ─────────────────────────────────────────────
 // シミュレーション
 // ─────────────────────────────────────────────
-const inputN = ref(15)
+const env = ref({ personPresent: false, isDark: false })
 
-// 正解のFizzBuzz出力
-function correctOutput(n) {
-  if (n % 3 === 0 && n % 5 === 0) return 'FizzBuzz'
-  if (n % 3 === 0) return 'Fizz'
-  if (n % 5 === 0) return 'Buzz'
-  return String(n)
-}
-
-const ACTION_LABEL = {
-  fizz: 'Fizz',
-  buzz: 'Buzz',
-  fizzbuzz: 'FizzBuzz',
-  number: String(inputN.value),
-}
-
-// ルールを上から評価し最初に一致したアクションを返す（if-elif-else 方式）
-const simResult = computed(() => {
-  const n = inputN.value
-  const conds = {
-    div3: n % 3 === 0,
-    div5: n % 5 === 0,
-    always: true,
-  }
-
-  for (const rule of rulesForApi.value) {
-    const allMet =
-      rule.conditions.length === 0
-        ? false
-        : rule.conditions.every((c) => conds[c.type] ?? false)
-
-    if (allMet) {
-      const output =
-        rule.action === 'number'
-          ? String(n)
-          : { fizz: 'Fizz', buzz: 'Buzz', fizzbuzz: 'FizzBuzz' }[rule.action] ?? '?'
-      const expected = correctOutput(n)
-      return { output, expected, is_correct: output === expected }
+function evaluate(ruleList, personPresent, isDark) {
+  const conds = { person_sensor: personPresent, dark_sensor: isDark }
+  let doorOpen = false
+  let bellRinging = false
+  for (const rule of ruleList) {
+    if (
+      rule.conditions.length > 0 &&
+      rule.conditions.every((c) => conds[c.type] ?? false)
+    ) {
+      if (rule.action === 'door') doorOpen = true
+      if (rule.action === 'bell') bellRinging = true
     }
   }
+  return { doorOpen, bellRinging }
+}
 
-  const expected = correctOutput(n)
-  return { output: '(なし)', expected, is_correct: false }
+function correctResult(personPresent, isDark) {
+  return {
+    doorOpen: personPresent,
+    bellRinging: personPresent && isDark,
+  }
+}
+
+const simResult = computed(() => {
+  const { personPresent, isDark } = env.value
+  const { doorOpen, bellRinging } = evaluate(rulesForApi.value, personPresent, isDark)
+  const correct = correctResult(personPresent, isDark)
+  return {
+    doorOpen,
+    bellRinging,
+    doorCorrect: doorOpen === correct.doorOpen,
+    bellCorrect: bellRinging === correct.bellRinging,
+    allCorrect: false, // filled below
+  }
 })
 
-// 全プリセットケースのサマリ
-const allCases = computed(() =>
-  PRESET_NUMBERS.map((n) => {
-    const conds = { div3: n % 3 === 0, div5: n % 5 === 0, always: true }
-    let output = '(なし)'
-    for (const rule of rulesForApi.value) {
-      const allMet =
-        rule.conditions.length > 0 &&
-        rule.conditions.every((c) => conds[c.type] ?? false)
-      if (allMet) {
-        output =
-          rule.action === 'number'
-            ? String(n)
-            : { fizz: 'Fizz', buzz: 'Buzz', fizzbuzz: 'FizzBuzz' }[rule.action] ?? '?'
-        break
-      }
+const allScenarios = computed(() =>
+  SCENARIOS.map((s) => {
+    const { doorOpen, bellRinging } = evaluate(rulesForApi.value, s.personPresent, s.isDark)
+    const correct = correctResult(s.personPresent, s.isDark)
+    return {
+      ...s,
+      doorOpen,
+      bellRinging,
+      doorCorrect: doorOpen === correct.doorOpen,
+      bellCorrect: bellRinging === correct.bellRinging,
+      ok: doorOpen === correct.doorOpen && bellRinging === correct.bellRinging,
     }
-    const expected = correctOutput(n)
-    return { n, output, expected, ok: output === expected }
   })
 )
+
+const allCorrect = computed(() => allScenarios.value.every((s) => s.ok))
 
 // ─────────────────────────────────────────────
 // AI チャット
 // ─────────────────────────────────────────────
-/* const chatMessages = ref([
+const chatMessages = ref([
   {
     id: 0,
     role: 'ai',
-    text: 'こんにちは！FizzBuzz のルールをブロックで作ってみよう。できたら「AIにアドバイスをもらう」ボタンを押してね。',
+    text: 'こんにちは！コンビニの入り口プログラムを一緒に考えましょう。\nまずは「どんなときにドアが開いてほしいか」から考えてみてください。できたら「AIに話しかける」ボタンを押してね。',
   },
 ])
- */
+const userInput = ref('')
 const isLoading = ref(false)
+const chatEndRef = ref(null)
 
-async function getAdvice() {
-  if (isLoading.value) return
+async function scrollToBottom() {
+  await nextTick()
+  chatEndRef.value?.scrollIntoView({ behavior: 'smooth' })
+}
 
-  const r = simResult.value
-  chatMessages.value.push({
-    id: Date.now(),
-    role: 'user',
-    text: `N = ${inputN.value} のテスト結果を確認してください。\n出力: ${r.output} ／ 期待値: ${r.expected} ／ ${r.is_correct ? '✓ 正解' : '✗ 不正解'}`,
-  })
+async function sendMessage() {
+  const text = userInput.value.trim()
+  if (!text || isLoading.value) return
+
+  chatMessages.value.push({ id: Date.now(), role: 'user', text })
+  userInput.value = ''
+  await scrollToBottom()
 
   isLoading.value = true
   try {
+    const r = simResult.value
     const res = await fetch('http://localhost:8001/api/advice', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         rules: rulesForApi.value,
-        environment: { n: inputN.value },
-        result: r,
+        environment: env.value,
+        result: { ...r, allCorrect: allCorrect.value },
+        history: chatMessages.value
+          .filter((m) => m.id !== 0)
+          .map((m) => ({ role: m.role, text: m.text })),
+        phase: currentPhase.value,
       }),
     })
     const data = await res.json()
@@ -182,48 +235,110 @@ async function getAdvice() {
     })
   } finally {
     isLoading.value = false
+    await scrollToBottom()
+  }
+}
+
+function handleKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    sendMessage()
+  }
+}
+
+async function requestAdvice() {
+  if (isLoading.value) return
+  isLoading.value = true
+  try {
+    const r = simResult.value
+    const res = await fetch('http://localhost:8001/api/advice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rules: rulesForApi.value,
+        environment: env.value,
+        result: { ...r, allCorrect: allCorrect.value },
+        history: chatMessages.value
+          .filter((m) => m.id !== 0)
+          .map((m) => ({ role: m.role, text: m.text })),
+        phase: currentPhase.value,
+      }),
+    })
+    const data = await res.json()
+    chatMessages.value.push({ id: Date.now(), role: 'ai', text: data.message })
+  } catch {
+    chatMessages.value.push({
+      id: Date.now(),
+      role: 'ai',
+      text: 'バックエンドに接続できませんでした。',
+    })
+  } finally {
+    isLoading.value = false
+    await scrollToBottom()
   }
 }
 </script>
 
 <template>
   <div class="app">
-    <header class="header">
-      <div class="header-inner">
-        <div class="header-tag">競技プログラミング 入門問題</div>
-        <h1>FizzBuzz チャレンジ</h1>
-        <p class="subtitle">
-          ブロックを並べてFizzBuzzのルールを完成させよう！ルールは<strong>上から順に</strong>評価されます。
-        </p>
-      </div>
-    </header>
-
-    <!-- 問題文バナー -->
+    <!-- 課題バナー -->
     <div class="problem-banner">
       <div class="problem-inner">
-        <span class="problem-label">問題</span>
+        <span class="problem-label">課題</span>
         <span class="problem-text">
-          整数 N が与えられたとき → 3の倍数かつ5の倍数なら <code>FizzBuzz</code>、
-          3の倍数なら <code>Fizz</code>、5の倍数なら <code>Buzz</code>、
-          それ以外は <code>N</code> をそのまま出力せよ。
+          人が来たら<strong>自動ドアを開ける</strong>、
+          夜に人が来たら<strong>チャイムを鳴らす</strong>プログラムを作ろう。
         </span>
       </div>
     </div>
 
-    <main class="main-grid">
-      <!-- ① プログラム構築エリア -->
+    <!-- フェーズステッパー -->
+    <div class="phase-bar">
+      <div class="phase-bar-inner">
+        <div class="phase-steps">
+          <div
+            v-for="p in PHASES"
+            :key="p.id"
+            class="phase-step"
+            :class="{
+              'step-done': p.id < currentPhase,
+              'step-active': p.id === currentPhase,
+              'step-future': p.id > currentPhase,
+            }"
+          >
+            <div class="step-circle">
+              <span v-if="p.id < currentPhase" class="step-check">✓</span>
+              <span v-else>{{ p.id }}</span>
+            </div>
+            <div class="step-label">{{ p.label }}</div>
+            <div v-if="p.id < PHASES.length" class="step-connector" />
+          </div>
+        </div>
+        <div class="phase-desc">{{ currentPhaseData.desc }}</div>
+        <div class="phase-nav">
+          <button
+            v-if="currentPhase < 4"
+            class="btn-next-phase"
+            @click="advancePhase"
+          >
+            次のフェーズへ進む →
+          </button>
+          <span v-else class="phase-final-msg">全フェーズ完了</span>
+        </div>
+      </div>
+    </div>
+
+    <main class="main-grid" :class="{ 'no-chat': !currentPhaseData.showChat }">
+      <!-- ① プログラム構築 -->
       <section class="panel panel-builder">
         <h2 class="panel-title">プログラム構築</h2>
         <p class="panel-desc">
-          条件とアクションを選んでルールを作ろう。ルールは<strong>上から順</strong>に評価されるぞ。
+          条件（センサー）とアクションを選んでルールを作ろう。<br>
+          複数のルールが同時に発動することもあるよ。
         </p>
 
         <div class="rules-list">
-          <div
-            v-for="(rule, index) in rules"
-            :key="rule.id"
-            class="rule-card"
-          >
+          <div v-for="(rule, index) in rules" :key="rule.id" class="rule-card">
             <div class="rule-header">
               <span class="rule-number">ルール {{ index + 1 }}</span>
               <div class="rule-order-btns">
@@ -234,51 +349,48 @@ async function getAdvice() {
             </div>
 
             <div class="rule-body">
-              <!-- 条件 1 -->
-              <div class="block condition-block">
-                <label class="block-label">条件①</label>
-                <select v-model="rule.cond1" class="select">
-                  <option
+              <!-- 条件選択（トグルボタン） -->
+              <div class="cond-group">
+                <span class="block-label">条件（AND でつながる）</span>
+                <div class="cond-buttons">
+                  <button
                     v-for="opt in CONDITION_OPTIONS"
                     :key="opt.value"
-                    :value="opt.value"
-                  >{{ opt.label }}</option>
-                </select>
+                    class="cond-toggle"
+                    :class="{ active: hasCondition(rule, opt.value) }"
+                    @click="toggleCondition(rule, opt.value)"
+                  >
+                    {{ opt.label }}
+                  </button>
+                </div>
+                <div v-if="rule.conditions.length >= 2" class="and-hint">
+                  <span class="and-badge">AND</span>
+                  <span class="and-hint-text">両方の条件が揃ったとき</span>
+                </div>
               </div>
 
-              <!-- AND + 条件 2 -->
-              <template v-if="rule.cond1 && rule.cond1 !== 'always'">
-                <div class="block and-block">
-                  <span class="and-badge">AND</span>
-                </div>
-                <div class="block condition-block">
-                  <label class="block-label">条件②（任意）</label>
-                  <select v-model="rule.cond2" class="select">
-                    <option value="">-- なし --</option>
-                    <option
-                      v-for="opt in CONDITION_OPTIONS.slice(1, 3)"
-                      :key="opt.value"
-                      :value="opt.value"
-                      :disabled="opt.value === rule.cond1"
-                    >{{ opt.label }}</option>
-                  </select>
-                </div>
-              </template>
-
-              <!-- Arrow -->
               <div class="arrow-block">→</div>
 
-              <!-- アクション -->
-              <div class="block action-block">
-                <label class="block-label">出力</label>
-                <select v-model="rule.action" class="select select-action">
-                  <option
+              <!-- アクション選択 -->
+              <div class="action-group">
+                <span class="block-label">アクション</span>
+                <div class="action-buttons">
+                  <button
                     v-for="opt in ACTION_OPTIONS"
                     :key="opt.value"
-                    :value="opt.value"
-                  >{{ opt.label }}</option>
-                </select>
+                    class="action-toggle"
+                    :class="{ active: rule.action === opt.value }"
+                    @click="rule.action = (rule.action === opt.value ? '' : opt.value)"
+                  >
+                    {{ opt.label }}
+                  </button>
+                </div>
               </div>
+            </div>
+
+            <!-- 未完成警告 -->
+            <div v-if="rule.conditions.length === 0 || !rule.action" class="rule-warn">
+              {{ rule.conditions.length === 0 ? '条件を選んでください' : 'アクションを選んでください' }}
             </div>
           </div>
 
@@ -290,114 +402,175 @@ async function getAdvice() {
         <button class="btn-add" @click="addRule">＋ ルールを追加</button>
       </section>
 
-      <!-- ② シミュレーションエリア -->
+      <!-- ② シミュレーション -->
       <section class="panel panel-sim">
         <h2 class="panel-title">シミュレーション</h2>
-        <p class="panel-desc">N を選んで、プログラムの出力を確認しよう。</p>
+        <p class="panel-desc">環境を選んで、プログラムの動きを確かめよう。</p>
 
-        <!-- N 選択 -->
-        <div class="n-selector">
-          <p class="env-group-label">テストする N を選ぶ</p>
-          <div class="preset-row">
-            <button
-              v-for="num in PRESET_NUMBERS"
-              :key="num"
-              class="preset-btn"
-              :class="{ active: inputN === num }"
-              @click="inputN = num"
-            >
-              {{ num }}
-            </button>
+        <!-- 環境選択 -->
+        <div class="env-selector">
+          <div class="env-row">
+            <span class="env-label">時間帯</span>
+            <div class="env-buttons">
+              <button
+                class="env-btn"
+                :class="{ active: !env.isDark }"
+                @click="env.isDark = false"
+              >昼</button>
+              <button
+                class="env-btn"
+                :class="{ active: env.isDark }"
+                @click="env.isDark = true"
+              >夜</button>
+            </div>
           </div>
-          <div class="custom-n-row">
-            <label class="block-label">または直接入力</label>
-            <input
-              type="number"
-              v-model.number="inputN"
-              min="1"
-              max="999"
-              class="n-input"
-            />
+          <div class="env-row">
+            <span class="env-label">人の有無</span>
+            <div class="env-buttons">
+              <button
+                class="env-btn"
+                :class="{ active: env.personPresent }"
+                @click="env.personPresent = true"
+              >人あり</button>
+              <button
+                class="env-btn"
+                :class="{ active: !env.personPresent }"
+                @click="env.personPresent = false"
+              >人なし</button>
+            </div>
           </div>
         </div>
 
-        <!-- 現在のN の結果 -->
-        <div class="current-result">
-          <div class="result-n-label">N = <strong>{{ inputN }}</strong> のとき</div>
-          <div class="result-row">
-            <div class="result-box">
-              <div class="result-box-label">あなたの出力</div>
-              <div class="result-box-value" :class="simResult.is_correct ? 'val-correct' : 'val-wrong'">
-                {{ simResult.output }}
+        <!-- ビジュアルシーン -->
+        <div class="sim-scene" :class="env.isDark ? 'scene-night' : 'scene-day'">
+
+          <!-- 空 -->
+          <div class="scene-sky">
+            <div v-if="!env.isDark" class="sun"></div>
+            <template v-else>
+              <div class="star" v-for="i in 6" :key="i" :style="{ left: (10 + i * 14) + '%', top: (8 + (i % 3) * 12) + '%' }"></div>
+            </template>
+          </div>
+
+          <!-- 地面 -->
+          <div class="scene-ground"></div>
+
+          <!-- 店舗 -->
+          <div class="store-building">
+            <!-- チャイム -->
+            <div class="store-bell-wrap">
+              <div class="store-bell" :class="{ 'bell-ringing': simResult.bellRinging }">
+                <div class="bell-top"></div>
+                <div class="bell-body-shape"></div>
+                <div class="bell-clapper"></div>
+              </div>
+              <div v-if="simResult.bellRinging" class="bell-wave">♪</div>
+            </div>
+
+            <!-- 店舗看板 -->
+            <div class="store-sign-bar">STORE</div>
+
+            <!-- 自動ドア（スライド） -->
+            <div class="door-frame">
+              <div class="door-panel door-left" :class="{ 'door-open': simResult.doorOpen }"></div>
+              <div class="door-panel door-right" :class="{ 'door-open': simResult.doorOpen }"></div>
+              <div class="door-floor"></div>
+            </div>
+          </div>
+
+          <!-- 人物 -->
+          <transition name="person-slide">
+            <div v-if="env.personPresent" class="person-figure">
+              <div class="person-head"></div>
+              <div class="person-body"></div>
+              <div class="person-legs">
+                <div class="leg left"></div>
+                <div class="leg right"></div>
               </div>
             </div>
-            <div class="result-sep">vs</div>
-            <div class="result-box">
-              <div class="result-box-label">正解</div>
-              <div class="result-box-value val-expected">{{ simResult.expected }}</div>
-            </div>
-          </div>
-          <div class="result-badge" :class="simResult.is_correct ? 'badge-ok' : 'badge-ng'">
-            {{ simResult.is_correct ? '✓ 正解！' : '✗ 不正解' }}
-          </div>
+          </transition>
         </div>
 
-        <!-- 全ケースの表 -->
-        <div class="case-table-wrap">
-          <p class="env-group-label" style="margin-bottom: 6px;">主要テストケース一覧</p>
-          <table class="case-table">
+        <!-- 全シナリオ表（クリックで切替） -->
+        <div class="scenario-wrap">
+          <p class="env-group-label">シナリオ切替</p>
+          <table class="scenario-table">
             <thead>
               <tr>
-                <th>N</th>
-                <th>3倍数</th>
-                <th>5倍数</th>
-                <th>出力</th>
-                <th>正解</th>
-                <th></th>
+                <th>状況</th>
+                <th>ドア</th>
+                <th>チャイム</th>
               </tr>
             </thead>
             <tbody>
               <tr
-                v-for="c in allCases"
-                :key="c.n"
-                :class="{ 'row-active': c.n === inputN }"
-                @click="inputN = c.n"
-                style="cursor: pointer;"
+                v-for="s in allScenarios"
+                :key="s.label"
+                :class="{ 'row-active': s.personPresent === env.personPresent && s.isDark === env.isDark }"
+                @click="env.personPresent = s.personPresent; env.isDark = s.isDark"
+                style="cursor:pointer"
               >
-                <td><strong>{{ c.n }}</strong></td>
-                <td>{{ c.n % 3 === 0 ? '✓' : '—' }}</td>
-                <td>{{ c.n % 5 === 0 ? '✓' : '—' }}</td>
-                <td :class="c.ok ? 'td-ok' : 'td-ng'">{{ c.output }}</td>
-                <td class="td-expected">{{ c.expected }}</td>
-                <td>{{ c.ok ? '✓' : '✗' }}</td>
+                <td>{{ s.label }}</td>
+                <td>{{ s.doorOpen ? '開' : '閉' }}</td>
+                <td>{{ s.bellRinging ? '鳴る' : '静か' }}</td>
               </tr>
             </tbody>
           </table>
         </div>
       </section>
 
-      <!-- ③ AI 対話エリア -->
-      <section class="panel panel-chat">
-        <h2 class="panel-title">AIアドバイス</h2>
-        <p class="panel-desc">AIが問いかけで考えるヒントをくれます。</p>
+      <!-- フェーズ1：AI非表示のプレースホルダー -->
+      <section v-if="!currentPhaseData.showChat" class="panel panel-chat-placeholder">
+        <div class="placeholder-title">AI との対話</div>
+        <div class="placeholder-text">
+          まずは<strong>自分だけで</strong>プログラムを考えてみよう。<br>
+          「次のフェーズへ進む」を押すと、AIと話し合えるようになるよ。
+        </div>
+      </section>
 
-        <div class="chat-window">
+      <!-- ③ AI 対話（フェーズ2以降） -->
+      <section v-if="currentPhaseData.showChat" class="panel panel-chat">
+        <h2 class="panel-title">AI との対話</h2>
+        <p class="panel-desc">
+          考えたことや疑問をAIに話しかけてみよう。<br>
+          ヒントをもらいながら一緒に考えられます。
+        </p>
+
+        <div class="chat-window" ref="chatWindowRef">
           <div
             v-for="msg in chatMessages"
             :key="msg.id"
             class="chat-bubble"
             :class="msg.role === 'ai' ? 'bubble-ai' : 'bubble-user'"
           >
+            <div class="bubble-avatar">{{ msg.role === 'ai' ? 'AI' : 'あなた' }}</div>
             <div class="bubble-text">{{ msg.text }}</div>
           </div>
 
           <div v-if="isLoading" class="chat-bubble bubble-ai loading-bubble">
+            <div class="bubble-avatar">AI</div>
             <div class="bubble-text">考え中<span class="dots">...</span></div>
           </div>
+
+          <div ref="chatEndRef" />
         </div>
 
-        <button class="btn-advice" :disabled="isLoading" @click="getAdvice">
-          {{ isLoading ? '考え中...' : 'AIにアドバイスをもらう' }}
+        <div class="chat-input-area">
+          <textarea
+            v-model="userInput"
+            class="chat-input"
+            placeholder="AIに話しかける（Enterで送信、Shift+Enterで改行）"
+            rows="2"
+            :disabled="isLoading"
+            @keydown="handleKeydown"
+          />
+          <button class="btn-send" :disabled="isLoading || !userInput.trim()" @click="sendMessage">
+            送信
+          </button>
+        </div>
+
+        <button class="btn-advice" :disabled="isLoading" @click="requestAdvice">
+          {{ isLoading ? '考え中...' : '今のプログラムについてアドバイスをもらう' }}
         </button>
       </section>
     </main>
@@ -430,7 +603,7 @@ async function getAdvice() {
 }
 
 body {
-  font-family: 'Noto Sans JP', sans-serif;
+  font-family: 'Noto Sans JP', 'Hiragino Sans', sans-serif;
   background: var(--clr-bg);
   color: var(--clr-text);
   line-height: 1.6;
@@ -442,45 +615,105 @@ body {
   flex-direction: column;
 }
 
-/* ── Header ── */
-.header {
-  background: linear-gradient(135deg, #1e3a8a 0%, #3b6ff0 100%);
-  color: white;
-  padding: 20px 24px;
-}
 
-.header-inner {
+/* ── Phase Bar ── */
+.phase-bar {
+  background: white;
+  border-bottom: 1px solid var(--clr-border);
+  padding: 14px 24px;
+}
+.phase-bar-inner {
   max-width: 1400px;
   margin: 0 auto;
 }
-
-.header-tag {
-  font-size: 0.72rem;
+.phase-steps {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.phase-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+}
+.step-circle {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
   font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  opacity: 0.75;
-  margin-bottom: 4px;
+  flex-shrink: 0;
+  border: 2px solid var(--clr-border);
+  background: white;
+  color: var(--clr-muted);
+  transition: all 0.2s;
 }
-
-.header h1 {
-  font-size: 1.6rem;
+.step-done .step-circle {
+  background: var(--clr-success);
+  border-color: var(--clr-success);
+  color: white;
+}
+.step-active .step-circle {
+  background: var(--clr-primary);
+  border-color: var(--clr-primary);
+  color: white;
+  box-shadow: 0 0 0 3px rgba(59,111,240,0.2);
+}
+.step-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--clr-muted);
+  white-space: nowrap;
+}
+.step-active .step-label { color: var(--clr-primary); }
+.step-done .step-label { color: var(--clr-success); }
+.step-future .step-label { color: var(--clr-muted); opacity: 0.6; }
+.step-connector {
+  width: 28px;
+  height: 2px;
+  background: var(--clr-border);
+  margin: 0 6px;
+  flex-shrink: 0;
+}
+.phase-desc {
+  font-size: 0.83rem;
+  color: var(--clr-text);
+  background: var(--clr-primary-light);
+  border-left: 3px solid var(--clr-primary);
+  padding: 6px 12px;
+  border-radius: 0 6px 6px 0;
+  margin-bottom: 10px;
+}
+.phase-nav { display: flex; align-items: center; }
+.btn-next-phase {
+  padding: 7px 18px;
+  background: var(--clr-primary);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  font-family: inherit;
   font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
 }
-
-.subtitle {
-  margin-top: 4px;
-  font-size: 0.88rem;
-  opacity: 0.9;
-}
+.btn-next-phase:hover { background: var(--clr-primary-dark); transform: translateY(-1px); }
+.phase-final-msg { font-size: 0.88rem; font-weight: 700; color: var(--clr-success); }
 
 /* ── Problem Banner ── */
 .problem-banner {
   background: #fefce8;
   border-bottom: 2px solid #fde68a;
   padding: 10px 24px;
+  border-top: none;
 }
-
 .problem-inner {
   max-width: 1400px;
   margin: 0 auto;
@@ -489,37 +722,22 @@ body {
   gap: 12px;
   flex-wrap: wrap;
 }
-
 .problem-label {
   font-size: 0.72rem;
   font-weight: 800;
   letter-spacing: 0.08em;
-  text-transform: uppercase;
   background: #f59e0b;
   color: white;
   padding: 2px 8px;
   border-radius: 4px;
   flex-shrink: 0;
 }
-
-.problem-text {
-  font-size: 0.88rem;
-  color: #78350f;
-}
-
-.problem-text code {
-  font-family: 'Courier New', monospace;
-  background: #fde68a;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-weight: 700;
-  font-size: 0.85em;
-}
+.problem-text { font-size: 0.88rem; color: #78350f; }
 
 /* ── Main Grid ── */
 .main-grid {
   display: grid;
-  grid-template-columns: 2fr 1.4fr 1.4fr;
+  grid-template-columns: 2fr 1.5fr 1.5fr;
   gap: 20px;
   padding: 20px 24px 32px;
   max-width: 1400px;
@@ -528,11 +746,12 @@ body {
   flex: 1;
   align-items: start;
 }
-
-@media (max-width: 1024px) {
-  .main-grid {
-    grid-template-columns: 1fr;
-  }
+@media (max-width: 1100px) {
+  .main-grid { grid-template-columns: 1fr 1fr; }
+  .panel-chat { grid-column: 1 / -1; }
+}
+@media (max-width: 700px) {
+  .main-grid { grid-template-columns: 1fr; }
 }
 
 /* ── Panel ── */
@@ -543,20 +762,16 @@ body {
   box-shadow: var(--shadow);
   border: 1px solid var(--clr-border);
 }
-
 .panel-title {
   font-size: 1.05rem;
   font-weight: 700;
-  display: flex;
-  align-items: center;
-  gap: 6px;
   margin-bottom: 4px;
 }
-
 .panel-desc {
   font-size: 0.82rem;
   color: var(--clr-muted);
   margin-bottom: 16px;
+  line-height: 1.5;
 }
 
 /* ── Rules ── */
@@ -567,7 +782,6 @@ body {
   margin-bottom: 14px;
   min-height: 60px;
 }
-
 .empty-hint {
   color: var(--clr-muted);
   font-size: 0.84rem;
@@ -577,106 +791,81 @@ body {
   border-radius: 8px;
   border: 2px dashed var(--clr-border);
 }
-
 .rule-card {
   background: var(--clr-primary-light);
   border: 1px solid #c7d7fb;
   border-radius: 10px;
-  padding: 10px 12px;
+  padding: 12px;
 }
-
 .rule-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   gap: 6px;
 }
-
-.rule-number {
-  font-size: 0.75rem;
-  font-weight: 700;
-  color: var(--clr-primary);
-  flex: 1;
-}
-
-.rule-order-btns {
-  display: flex;
-  gap: 4px;
-}
-
+.rule-number { font-size: 0.75rem; font-weight: 700; color: var(--clr-primary); flex: 1; }
+.rule-order-btns { display: flex; gap: 4px; }
 .btn-order {
-  width: 22px;
-  height: 22px;
+  width: 22px; height: 22px;
   border-radius: 4px;
   border: 1px solid var(--clr-border);
   background: white;
   color: var(--clr-muted);
   font-size: 0.7rem;
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   transition: background 0.1s;
 }
-
-.btn-order:hover:not(:disabled) {
-  background: var(--clr-primary-light);
-  color: var(--clr-primary);
-}
-
-.btn-order:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
+.btn-order:hover:not(:disabled) { background: var(--clr-primary-light); color: var(--clr-primary); }
+.btn-order:disabled { opacity: 0.3; cursor: not-allowed; }
 .btn-remove {
-  width: 22px;
-  height: 22px;
+  width: 22px; height: 22px;
   border-radius: 50%;
   border: none;
   background: #fecaca;
   color: var(--clr-danger);
   font-size: 0.9rem;
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   transition: background 0.15s;
 }
-
 .btn-remove:hover { background: #fca5a5; }
 
 .rule-body {
   display: flex;
-  align-items: flex-end;
-  gap: 6px;
+  align-items: flex-start;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
-.block { display: flex; flex-direction: column; gap: 3px; }
-.block-label { font-size: 0.7rem; color: var(--clr-muted); font-weight: 500; }
+.block-label { font-size: 0.7rem; color: var(--clr-muted); font-weight: 600; margin-bottom: 5px; display: block; }
 
-.select {
-  padding: 5px 8px;
-  border: 1px solid var(--clr-border);
+.cond-group { display: flex; flex-direction: column; }
+.cond-buttons { display: flex; flex-direction: column; gap: 5px; }
+.cond-toggle {
+  padding: 5px 10px;
   border-radius: 7px;
-  font-size: 0.8rem;
-  font-family: inherit;
+  border: 2px solid var(--clr-border);
   background: white;
-  color: var(--clr-text);
+  font-size: 0.78rem;
+  font-family: inherit;
   cursor: pointer;
-  min-width: 150px;
-  transition: border-color 0.15s;
+  color: var(--clr-muted);
+  text-align: left;
+  transition: all 0.15s;
 }
-
-.select:focus {
-  outline: none;
+.cond-toggle.active {
   border-color: var(--clr-primary);
-  box-shadow: 0 0 0 3px rgba(59, 111, 240, 0.15);
+  background: var(--clr-primary-light);
+  color: var(--clr-primary);
+  font-weight: 700;
 }
 
-.and-block { padding-bottom: 3px; }
+.and-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+}
 .and-badge {
   display: inline-block;
   padding: 2px 7px;
@@ -685,20 +874,43 @@ body {
   border-radius: 5px;
   font-size: 0.7rem;
   font-weight: 700;
-  letter-spacing: 0.05em;
 }
+.and-hint-text { font-size: 0.7rem; color: var(--clr-muted); }
 
 .arrow-block {
-  font-size: 1.3rem;
+  font-size: 1.4rem;
   color: var(--clr-primary);
   font-weight: 700;
-  padding-bottom: 2px;
+  padding-top: 24px;
   flex-shrink: 0;
 }
 
-.select-action {
+.action-group { display: flex; flex-direction: column; }
+.action-buttons { display: flex; flex-direction: column; gap: 5px; }
+.action-toggle {
+  padding: 5px 12px;
+  border-radius: 7px;
+  border: 2px solid var(--clr-border);
+  background: white;
+  font-size: 0.78rem;
+  font-family: inherit;
+  cursor: pointer;
+  color: var(--clr-muted);
+  text-align: left;
+  transition: all 0.15s;
+}
+.action-toggle.active {
+  border-color: #f59e0b;
   background: #fffbeb;
-  border-color: #fcd34d;
+  color: #92400e;
+  font-weight: 700;
+}
+
+.rule-warn {
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: var(--clr-warn);
+  font-weight: 600;
 }
 
 .btn-add {
@@ -714,142 +926,235 @@ body {
   cursor: pointer;
   transition: background 0.15s, transform 0.1s;
 }
-
-.btn-add:hover {
-  background: var(--clr-primary-dark);
-  transform: translateY(-1px);
-}
+.btn-add:hover { background: var(--clr-primary-dark); transform: translateY(-1px); }
 
 /* ── Simulation ── */
-.n-selector { margin-bottom: 18px; }
-.env-group-label {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--clr-muted);
-  margin-bottom: 8px;
-}
-
-.preset-row {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
-}
-
-.preset-btn {
-  padding: 5px 12px;
+.env-selector { margin-bottom: 16px; display: flex; flex-direction: column; gap: 10px; }
+.env-row { display: flex; align-items: center; gap: 10px; }
+.env-label { font-size: 0.78rem; font-weight: 600; color: var(--clr-muted); min-width: 60px; }
+.env-buttons { display: flex; gap: 6px; }
+.env-btn {
+  padding: 5px 14px;
   border: 2px solid var(--clr-border);
   border-radius: 6px;
   background: white;
-  font-size: 0.9rem;
-  font-family: 'Courier New', monospace;
-  font-weight: 700;
+  font-size: 0.82rem;
+  font-family: inherit;
   cursor: pointer;
   color: var(--clr-muted);
   transition: all 0.15s;
 }
-
-.preset-btn.active {
+.env-btn.active {
   border-color: var(--clr-primary);
   background: var(--clr-primary-light);
   color: var(--clr-primary);
-}
-
-.preset-btn:hover:not(.active) { border-color: #94a3b8; color: var(--clr-text); }
-
-.custom-n-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.n-input {
-  width: 80px;
-  padding: 5px 8px;
-  border: 1px solid var(--clr-border);
-  border-radius: 7px;
-  font-size: 0.9rem;
-  font-family: 'Courier New', monospace;
   font-weight: 700;
-  text-align: center;
 }
 
-.n-input:focus {
-  outline: none;
-  border-color: var(--clr-primary);
-}
-
-/* current result */
-.current-result {
-  background: var(--clr-bg);
+/* ── Visual Scene ── */
+.sim-scene {
+  position: relative;
+  width: 100%;
+  height: 220px;
   border-radius: 10px;
-  padding: 14px;
-  margin-bottom: 16px;
-  text-align: center;
+  overflow: hidden;
+  margin-bottom: 14px;
+  transition: background 0.8s ease;
+}
+.scene-day {
+  background: linear-gradient(to bottom, #87ceeb 0%, #c8e8f8 60%, #8db87a 60%, #7aaa60 100%);
+}
+.scene-night {
+  background: linear-gradient(to bottom, #0b1340 0%, #1a2560 60%, #3a5230 60%, #2e4225 100%);
 }
 
-.result-n-label {
-  font-size: 0.82rem;
-  color: var(--clr-muted);
-  margin-bottom: 10px;
+/* 空の装飾 */
+.scene-sky { position: absolute; top: 0; left: 0; width: 100%; height: 60%; }
+.sun {
+  position: absolute;
+  top: 14%;
+  right: 12%;
+  width: 32px;
+  height: 32px;
+  background: #ffd700;
+  border-radius: 50%;
+  box-shadow: 0 0 16px 4px rgba(255,220,0,0.5);
 }
-
-.result-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.result-box {
+.star {
+  position: absolute;
+  width: 3px;
+  height: 3px;
   background: white;
-  border: 1px solid var(--clr-border);
-  border-radius: 8px;
-  padding: 10px 16px;
-  min-width: 90px;
+  border-radius: 50%;
+  opacity: 0.9;
 }
 
-.result-box-label {
-  font-size: 0.7rem;
-  color: var(--clr-muted);
-  font-weight: 600;
-  margin-bottom: 4px;
+/* 地面 */
+.scene-ground {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 40%;
 }
 
-.result-box-value {
-  font-size: 1.3rem;
+/* 店舗 */
+.store-building {
+  position: absolute;
+  bottom: 40%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 160px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.store-sign-bar {
+  width: 100%;
+  background: #e74c3c;
+  color: white;
+  text-align: center;
+  font-size: 0.72rem;
   font-weight: 800;
-  font-family: 'Courier New', monospace;
+  letter-spacing: 0.2em;
+  padding: 4px 0;
+  border-radius: 3px 3px 0 0;
 }
 
-.val-correct { color: var(--clr-success); }
-.val-wrong { color: var(--clr-danger); }
-.val-expected { color: var(--clr-text); }
-
-.result-sep { font-size: 0.82rem; color: var(--clr-muted); }
-
-.result-badge {
-  display: inline-block;
-  padding: 3px 14px;
-  border-radius: 20px;
-  font-size: 0.82rem;
-  font-weight: 700;
+/* チャイム */
+.store-bell-wrap {
+  position: absolute;
+  top: -36px;
+  right: 16px;
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+}
+.store-bell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transform-origin: top center;
+}
+.bell-top {
+  width: 6px;
+  height: 6px;
+  background: #888;
+  border-radius: 50%;
+}
+.bell-body-shape {
+  width: 18px;
+  height: 16px;
+  background: #e0a800;
+  border-radius: 0 0 9px 9px;
+  border: 2px solid #c08000;
+}
+.bell-clapper {
+  width: 4px;
+  height: 5px;
+  background: #888;
+  border-radius: 0 0 2px 2px;
+}
+@keyframes bell-ring {
+  0%,100% { transform: rotate(0deg); }
+  20%     { transform: rotate(-22deg); }
+  50%     { transform: rotate(22deg); }
+  80%     { transform: rotate(-14deg); }
+}
+.bell-ringing {
+  animation: bell-ring 0.35s ease infinite;
+}
+.bell-wave {
+  font-size: 0.9rem;
+  color: #f59e0b;
+  animation: wave-float 0.6s ease infinite alternate;
+}
+@keyframes wave-float {
+  from { transform: translateY(0); opacity: 1; }
+  to   { transform: translateY(-6px); opacity: 0.4; }
 }
 
-.badge-ok { background: #d1fae5; color: #065f46; }
-.badge-ng { background: #fee2e2; color: #991b1b; }
+/* 自動ドア */
+.door-frame {
+  position: relative;
+  width: 90px;
+  height: 80px;
+  background: #b0c8e0;
+  border: 3px solid #7a9ab8;
+  border-bottom: none;
+  overflow: hidden;
+}
+.door-panel {
+  position: absolute;
+  top: 0;
+  width: 50%;
+  height: 100%;
+  background: rgba(180, 220, 245, 0.7);
+  border: 1px solid rgba(120, 180, 220, 0.8);
+  transition: transform 0.5s ease;
+}
+.door-left  { left: 0;  transform: translateX(0); }
+.door-right { right: 0; transform: translateX(0); }
+.door-left.door-open  { transform: translateX(-100%); }
+.door-right.door-open { transform: translateX(100%); }
+.door-floor {
+  position: absolute;
+  bottom: -3px;
+  left: -3px;
+  right: -3px;
+  height: 6px;
+  background: #7a9ab8;
+}
 
-/* case table */
-.case-table-wrap { overflow-x: auto; }
+/* 人物 */
+.person-figure {
+  position: absolute;
+  bottom: 40%;
+  right: 16%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+.person-head {
+  width: 18px;
+  height: 18px;
+  background: #f5cba7;
+  border-radius: 50%;
+  border: 2px solid #d4a374;
+}
+.person-body {
+  width: 20px;
+  height: 26px;
+  background: #3498db;
+  border-radius: 3px;
+}
+.person-legs {
+  display: flex;
+  gap: 4px;
+}
+.leg {
+  width: 8px;
+  height: 18px;
+  background: #2c3e50;
+  border-radius: 0 0 3px 3px;
+}
+/* 人物の入退場アニメーション */
+.person-slide-enter-active { transition: opacity 0.4s, transform 0.4s; }
+.person-slide-leave-active { transition: opacity 0.3s, transform 0.3s; }
+.person-slide-enter-from { opacity: 0; transform: translateX(40px); }
+.person-slide-leave-to   { opacity: 0; transform: translateX(40px); }
 
-.case-table {
+.env-group-label { font-size: 0.78rem; font-weight: 600; color: var(--clr-muted); margin-bottom: 8px; }
+
+.scenario-wrap { }
+.scenario-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.82rem;
+  margin-bottom: 10px;
 }
-
-.case-table th {
+.scenario-table th {
   background: var(--clr-bg);
   padding: 6px 8px;
   text-align: center;
@@ -858,46 +1163,55 @@ body {
   border-bottom: 2px solid var(--clr-border);
   font-size: 0.75rem;
 }
-
-.case-table td {
+.scenario-table td {
   padding: 6px 8px;
   text-align: center;
   border-bottom: 1px solid var(--clr-border);
-  font-family: 'Courier New', monospace;
   font-weight: 600;
 }
+.row-active { background: #eff6ff !important; }
 
-.case-table .row-active { background: #eff6ff; }
-
-.td-ok { color: var(--clr-success); }
-.td-ng { color: var(--clr-danger); }
-.td-expected { color: var(--clr-muted); }
+/* ── Chat Placeholder (Phase 1) ── */
+.panel-chat-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  min-height: 200px;
+  background: var(--clr-bg);
+  border: 2px dashed var(--clr-border);
+  color: var(--clr-muted);
+  gap: 10px;
+}
+.placeholder-title { font-size: 1rem; font-weight: 700; }
+.placeholder-text { font-size: 0.82rem; line-height: 1.7; }
 
 /* ── Chat ── */
 .panel-chat { display: flex; flex-direction: column; }
-
 .chat-window {
   flex: 1;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-height: 280px;
-  max-height: 460px;
+  min-height: 300px;
+  max-height: 420px;
   overflow-y: auto;
-  padding: 2px 2px 12px;
-  margin-bottom: 12px;
+  padding: 4px 4px 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--clr-border);
+  border-radius: 10px;
+  background: var(--clr-bg);
 }
-
 .chat-bubble {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  max-width: 94%;
+  max-width: 96%;
 }
-
 .bubble-ai { align-self: flex-start; }
 .bubble-user { align-self: flex-end; flex-direction: row-reverse; }
-
+.bubble-avatar { font-size: 1.1rem; flex-shrink: 0; margin-top: 2px; }
 .bubble-text {
   padding: 9px 13px;
   border-radius: 13px;
@@ -906,41 +1220,72 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
 }
-
 .bubble-ai .bubble-text {
-  background: var(--clr-primary-light);
-  border: 1px solid #c7d7fb;
+  background: white;
+  border: 1px solid var(--clr-border);
   border-top-left-radius: 4px;
 }
-
 .bubble-user .bubble-text {
-  background: #1e293b;
-  color: #e2e8f0;
+  background: var(--clr-primary);
+  color: white;
   border-top-right-radius: 4px;
-  font-size: 0.8rem;
 }
 
 .dots { animation: blink 1.2s infinite; }
-
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.2; }
 }
 
+.chat-input-area {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.chat-input {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--clr-border);
+  border-radius: 8px;
+  font-size: 0.84rem;
+  font-family: inherit;
+  resize: none;
+  line-height: 1.5;
+}
+.chat-input:focus {
+  outline: none;
+  border-color: var(--clr-primary);
+  box-shadow: 0 0 0 3px rgba(59,111,240,0.15);
+}
+.btn-send {
+  padding: 0 16px;
+  background: var(--clr-primary);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  font-family: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s;
+  align-self: stretch;
+}
+.btn-send:hover:not(:disabled) { background: var(--clr-primary-dark); }
+.btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .btn-advice {
   width: 100%;
-  padding: 12px;
+  padding: 11px;
   background: linear-gradient(135deg, #10b981, #059669);
   color: white;
   border: none;
   border-radius: 8px;
-  font-size: 0.92rem;
+  font-size: 0.88rem;
   font-family: inherit;
   font-weight: 700;
   cursor: pointer;
   transition: opacity 0.15s, transform 0.1s;
 }
-
 .btn-advice:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
 .btn-advice:disabled { opacity: 0.6; cursor: not-allowed; }
 </style>
