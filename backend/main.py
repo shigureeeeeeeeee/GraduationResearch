@@ -52,7 +52,8 @@ class AdviceRequest(BaseModel):
     rules: List[Rule]
     environment: Environment
     result: SimulationResult
-    history: Optional[List[ChatMessage]] = []
+    history: Optional[List[ChatMessage]] = []   # 過去の会話ターン（今回の発言を含まない）
+    current_message: Optional[str] = None        # 今回送るメッセージ
     phase: Optional[int] = 2  # 2=pair, 3=verify, 4=group
 
 
@@ -136,6 +137,32 @@ def get_system_prompt(phase: int) -> str:
     elif phase == 4:
         return SYSTEM_PROMPT_PHASE4
     return SYSTEM_PROMPT_PHASE2
+
+
+def build_system_instruction(phase: int, req: "AdviceRequest") -> str:
+    """フェーズの役割 + 学習者の現在のプログラム状態をシステム指示として返す"""
+    role_prompt = get_system_prompt(phase)
+
+    rules_str = describe_rules(req.rules)
+    scenarios_str = describe_scenarios(req.rules)
+    env_label = f"{'夜' if req.environment.isDark else '昼'} × {'人あり' if req.environment.personPresent else '人なし'}"
+
+    program_context = f"""
+=== 学習者が現在作っているプログラム ===
+{rules_str}
+
+=== 全シナリオのシミュレーション結果 ===
+{scenarios_str}
+
+=== 現在選択中の環境 ===
+  {env_label}
+  ドア: {'開いている' if req.result.doorOpen else '閉まっている'} {'（正しい）' if req.result.doorCorrect else '（間違い）'}
+  チャイム: {'鳴っている' if req.result.bellRinging else '静か'} {'（正しい）' if req.result.bellCorrect else '（間違い）'}
+  全体判定: {'全シナリオ正解' if req.result.allCorrect else '不正解あり'}
+
+このプログラムの状態を常に念頭に置いて対話してください。
+"""
+    return role_prompt + program_context
 
 
 def describe_rules(rules: List[Rule]) -> str:
@@ -275,35 +302,44 @@ def fallback_response(req: AdviceRequest) -> str:
 
 @app.post("/api/advice")
 async def get_advice(req: AdviceRequest):
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
+
+    # 今回送るメッセージ（未指定ならアドバイスリクエスト扱い）
+    message_to_send = req.current_message or "今のプログラムについてコメントしてください。"
 
     if api_key:
         try:
-            from openai import AsyncOpenAI
+            from google import genai
+            from google.genai import types
 
-            client = AsyncOpenAI(api_key=api_key)
+            client = genai.Client(api_key=api_key)
 
-            messages = [{"role": "system", "content": get_system_prompt(req.phase or 2)}]
+            # 過去の会話履歴を Gemini 形式に変換（直近10件）
+            history = []
+            for msg in (req.history or [])[-10:]:
+                history.append(
+                    types.Content(
+                        role="user" if msg.role == "user" else "model",
+                        parts=[types.Part(text=msg.text)],
+                    )
+                )
 
-            # 過去の会話履歴を含める
-            if req.history:
-                for msg in req.history[-6:]:  # 直近6件
-                    messages.append({
-                        "role": "user" if msg.role == "user" else "assistant",
-                        "content": msg.text,
-                    })
+            # プログラム状態をシステム指示に組み込む
+            system_instruction = build_system_instruction(req.phase or 2, req)
 
-            messages.append({"role": "user", "content": build_user_message(req)})
-
-            response = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                max_tokens=350,
-                temperature=0.7,
+            chat = client.chats.create(
+                model="gemini-2.5-flash",
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    max_output_tokens=400,
+                    temperature=0.7,
+                ),
+                history=history,
             )
-            return {"message": response.choices[0].message.content}
+            response = chat.send_message(message_to_send)
+            return {"message": response.text}
         except Exception as e:
-            return {"message": f"LLM API エラー: {e}"}
+            return {"message": f"Gemini API エラー: {e}"}
 
     return {"message": fallback_response(req)}
 

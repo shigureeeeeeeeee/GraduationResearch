@@ -201,31 +201,41 @@ async function scrollToBottom() {
   chatEndRef.value?.scrollIntoView({ behavior: 'smooth' })
 }
 
+// API 呼び出しの共通処理
+async function callAdviceApi(currentMessage) {
+  const r = simResult.value
+  // history = 今回の発言を含まない過去の会話ターン
+  const history = chatMessages.value
+    .filter((m) => m.id !== 0)
+    .map((m) => ({ role: m.role, text: m.text }))
+
+  const res = await fetch('http://localhost:8001/api/advice', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      rules: rulesForApi.value,
+      environment: env.value,
+      result: { ...r, allCorrect: allCorrect.value },
+      history,
+      current_message: currentMessage,
+      phase: currentPhase.value,
+    }),
+  })
+  return res.json()
+}
+
 async function sendMessage() {
   const text = userInput.value.trim()
   if (!text || isLoading.value) return
 
+  // 先に表示に追加してから API 呼び出し
   chatMessages.value.push({ id: Date.now(), role: 'user', text })
   userInput.value = ''
   await scrollToBottom()
 
   isLoading.value = true
   try {
-    const r = simResult.value
-    const res = await fetch('http://localhost:8001/api/advice', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        rules: rulesForApi.value,
-        environment: env.value,
-        result: { ...r, allCorrect: allCorrect.value },
-        history: chatMessages.value
-          .filter((m) => m.id !== 0)
-          .map((m) => ({ role: m.role, text: m.text })),
-        phase: currentPhase.value,
-      }),
-    })
-    const data = await res.json()
+    const data = await callAdviceApi(text)
     chatMessages.value.push({ id: Date.now() + 1, role: 'ai', text: data.message })
   } catch {
     chatMessages.value.push({
@@ -250,21 +260,8 @@ async function requestAdvice() {
   if (isLoading.value) return
   isLoading.value = true
   try {
-    const r = simResult.value
-    const res = await fetch('http://localhost:8001/api/advice', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        rules: rulesForApi.value,
-        environment: env.value,
-        result: { ...r, allCorrect: allCorrect.value },
-        history: chatMessages.value
-          .filter((m) => m.id !== 0)
-          .map((m) => ({ role: m.role, text: m.text })),
-        phase: currentPhase.value,
-      }),
-    })
-    const data = await res.json()
+    // current_message なし → バックエンドがアドバイスリクエストとして処理
+    const data = await callAdviceApi(null)
     chatMessages.value.push({ id: Date.now(), role: 'ai', text: data.message })
   } catch {
     chatMessages.value.push({
