@@ -1,5 +1,96 @@
 <script setup>
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, reactive } from 'vue'
+
+// ─────────────────────────────────────────────
+// セッション管理
+// ─────────────────────────────────────────────
+const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+async function saveLog(event, phase) {
+  try {
+    await fetch('http://localhost:8001/api/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        event,
+        phase,
+        rules: rulesForApi.value,
+        chat_history: chatMessages.value
+          .filter((m) => m.id !== 0)
+          .map((m) => ({ role: m.role, text: m.text })),
+        all_correct: allCorrect.value,
+      }),
+    })
+  } catch {
+    // ログ保存失敗は無視（メイン機能に影響させない）
+  }
+}
+
+// ─────────────────────────────────────────────
+// 実験者設定（プロンプト編集）
+// ─────────────────────────────────────────────
+const settingsOpen = ref(false)
+const settingsSaving = ref(false)
+const settingsMsg = ref('')
+const prompts = reactive({
+  base: '',
+  phase2_extra: '',
+  phase3_extra: '',
+  phase4_extra: '',
+})
+const PHASE_PROMPT_LABELS = [
+  { key: 'base', label: '共通ベースプロンプト' },
+  { key: 'phase2_extra', label: 'フェーズ2「ペアで対話」追加指示' },
+  { key: 'phase3_extra', label: 'フェーズ3「実行して確認」追加指示' },
+  { key: 'phase4_extra', label: 'フェーズ4「全体で対話」追加指示' },
+]
+
+async function openSettings() {
+  settingsOpen.value = true
+  settingsMsg.value = ''
+  try {
+    const res = await fetch('http://localhost:8001/api/config/prompts')
+    const data = await res.json()
+    Object.assign(prompts, data)
+  } catch {
+    settingsMsg.value = 'プロンプト設定の読み込みに失敗しました'
+  }
+}
+
+async function saveSettings() {
+  settingsSaving.value = true
+  settingsMsg.value = ''
+  try {
+    const res = await fetch('http://localhost:8001/api/config/prompts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...prompts }),
+    })
+    const data = await res.json()
+    if (data.status === 'ok') {
+      settingsMsg.value = '保存しました'
+    }
+  } catch {
+    settingsMsg.value = '保存に失敗しました'
+  } finally {
+    settingsSaving.value = false
+  }
+}
+
+async function resetSettings() {
+  if (!confirm('プロンプトをデフォルトに戻しますか？')) return
+  settingsSaving.value = true
+  try {
+    await fetch('http://localhost:8001/api/config/prompts/reset', { method: 'POST' })
+    await openSettings()
+    settingsMsg.value = 'デフォルトに戻しました'
+  } catch {
+    settingsMsg.value = 'リセットに失敗しました'
+  } finally {
+    settingsSaving.value = false
+  }
+}
 
 // ─────────────────────────────────────────────
 // フェーズ管理
@@ -40,8 +131,10 @@ const PHASE_INTRO_MESSAGES = {
   4: 'みんなのプログラムが出揃ったところで、全体で話し合おう！\n他のグループが作ったプログラムを紹介するね。まず「今のプログラムについてアドバイスをもらう」ボタンを押してみて。',
 }
 
-function advancePhase() {
+async function advancePhase() {
   if (currentPhase.value >= 4) return
+  // 現フェーズの状態を保存してから進む
+  await saveLog('phase_complete', currentPhase.value)
   const next = currentPhase.value + 1
   currentPhase.value = next
   if (PHASE_INTRO_MESSAGES[next]) {
@@ -52,6 +145,10 @@ function advancePhase() {
     })
     nextTick(() => chatEndRef.value?.scrollIntoView({ behavior: 'smooth' }))
   }
+}
+
+async function completeSession() {
+  await saveLog('session_end', 4)
 }
 
 // ─────────────────────────────────────────────
@@ -278,6 +375,50 @@ async function requestAdvice() {
 
 <template>
   <div class="app">
+    <!-- 実験者設定ボタン -->
+    <button class="settings-fab" @click="openSettings" title="実験者設定">&#9881;</button>
+
+    <!-- 設定ドロワー -->
+    <transition name="drawer">
+      <div v-if="settingsOpen" class="settings-overlay" @click.self="settingsOpen = false">
+        <div class="settings-drawer">
+          <div class="settings-header">
+            <h2 class="settings-title">実験者設定 - AIプロンプト編集</h2>
+            <button class="settings-close" @click="settingsOpen = false">×</button>
+          </div>
+          <p class="settings-note">
+            ここで編集したプロンプトはバックエンドに保存され、次のAI応答から反映されます。
+          </p>
+
+          <div class="settings-body">
+            <div
+              v-for="item in PHASE_PROMPT_LABELS"
+              :key="item.key"
+              class="prompt-block"
+            >
+              <label class="prompt-label">{{ item.label }}</label>
+              <textarea
+                v-model="prompts[item.key]"
+                class="prompt-textarea"
+                rows="8"
+                spellcheck="false"
+              />
+            </div>
+          </div>
+
+          <div class="settings-footer">
+            <span v-if="settingsMsg" class="settings-msg">{{ settingsMsg }}</span>
+            <button class="btn-reset-prompt" @click="resetSettings" :disabled="settingsSaving">
+              デフォルトに戻す
+            </button>
+            <button class="btn-save-prompt" @click="saveSettings" :disabled="settingsSaving">
+              {{ settingsSaving ? '保存中...' : '保存する' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
     <!-- 課題バナー -->
     <div class="problem-banner">
       <div class="problem-inner">
@@ -320,7 +461,13 @@ async function requestAdvice() {
           >
             次のフェーズへ進む →
           </button>
-          <span v-else class="phase-final-msg">全フェーズ完了</span>
+          <button
+            v-else
+            class="btn-next-phase btn-complete"
+            @click="completeSession"
+          >
+            セッションを完了して保存する
+          </button>
         </div>
       </div>
     </div>
@@ -702,7 +849,8 @@ body {
   transition: background 0.15s, transform 0.1s;
 }
 .btn-next-phase:hover { background: var(--clr-primary-dark); transform: translateY(-1px); }
-.phase-final-msg { font-size: 0.88rem; font-weight: 700; color: var(--clr-success); }
+.btn-complete { background: var(--clr-success); }
+.btn-complete:hover { background: #059669; transform: translateY(-1px); }
 
 /* ── Problem Banner ── */
 .problem-banner {
@@ -1285,4 +1433,159 @@ body {
 }
 .btn-advice:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
 .btn-advice:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* ── Settings FAB ── */
+.settings-fab {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 200;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--clr-muted);
+  color: white;
+  border: none;
+  font-size: 1.3rem;
+  cursor: pointer;
+  box-shadow: 0 3px 12px rgba(0,0,0,0.2);
+  transition: background 0.15s, transform 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.settings-fab:hover { background: var(--clr-text); transform: rotate(30deg); }
+
+/* ── Settings Drawer ── */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  z-index: 300;
+  display: flex;
+  justify-content: flex-end;
+}
+.settings-drawer {
+  width: min(640px, 100vw);
+  height: 100%;
+  background: white;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.15);
+}
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--clr-border);
+  flex-shrink: 0;
+}
+.settings-title {
+  font-size: 1rem;
+  font-weight: 700;
+}
+.settings-close {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: var(--clr-bg);
+  font-size: 1.1rem;
+  cursor: pointer;
+  color: var(--clr-muted);
+}
+.settings-close:hover { background: var(--clr-border); }
+
+.settings-note {
+  padding: 10px 24px;
+  font-size: 0.78rem;
+  color: var(--clr-muted);
+  background: var(--clr-bg);
+  border-bottom: 1px solid var(--clr-border);
+  flex-shrink: 0;
+}
+
+.settings-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.prompt-block { display: flex; flex-direction: column; gap: 6px; }
+.prompt-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--clr-primary);
+  letter-spacing: 0.02em;
+}
+.prompt-textarea {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--clr-border);
+  border-radius: 8px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  resize: vertical;
+  color: var(--clr-text);
+  background: #fafafa;
+}
+.prompt-textarea:focus {
+  outline: none;
+  border-color: var(--clr-primary);
+  box-shadow: 0 0 0 3px rgba(59,111,240,0.12);
+  background: white;
+}
+
+.settings-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--clr-border);
+  flex-shrink: 0;
+}
+.settings-msg {
+  flex: 1;
+  font-size: 0.82rem;
+  color: var(--clr-success);
+  font-weight: 600;
+}
+.btn-reset-prompt {
+  padding: 8px 16px;
+  border: 1px solid var(--clr-border);
+  border-radius: 7px;
+  background: white;
+  font-size: 0.82rem;
+  font-family: inherit;
+  cursor: pointer;
+  color: var(--clr-muted);
+}
+.btn-reset-prompt:hover:not(:disabled) { background: var(--clr-bg); }
+.btn-reset-prompt:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-save-prompt {
+  padding: 8px 20px;
+  background: var(--clr-primary);
+  color: white;
+  border: none;
+  border-radius: 7px;
+  font-size: 0.82rem;
+  font-family: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-save-prompt:hover:not(:disabled) { background: var(--clr-primary-dark); }
+.btn-save-prompt:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Drawer transition ── */
+.drawer-enter-active { transition: opacity 0.2s; }
+.drawer-leave-active { transition: opacity 0.2s; }
+.drawer-enter-from, .drawer-leave-to { opacity: 0; }
+.drawer-enter-active .settings-drawer { transition: transform 0.25s ease; }
+.drawer-leave-active .settings-drawer { transition: transform 0.2s ease; }
+.drawer-enter-from .settings-drawer { transform: translateX(100%); }
+.drawer-leave-to .settings-drawer { transform: translateX(100%); }
 </style>

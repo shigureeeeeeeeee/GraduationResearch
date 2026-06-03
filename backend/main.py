@@ -1,8 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 import os
+import json
+from datetime import datetime, timezone
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -86,7 +89,13 @@ SYSTEM_PROMPT_BASE = """\
 5. 会話の流れを踏まえて前の返答に応じた反応をする
 """
 
-SYSTEM_PROMPT_PHASE2 = SYSTEM_PROMPT_BASE + """
+
+
+PROMPT_FILE = Path(__file__).parent / "data" / "prompts.json"
+
+DEFAULT_PROMPTS = {
+    "base": SYSTEM_PROMPT_BASE,
+    "phase2_extra": """
 【あなたの役割：ペアの友達】
 今は「ペアで対話する」フェーズです。あなたは学習者のペアの友達として振る舞ってください。
 
@@ -94,18 +103,16 @@ SYSTEM_PROMPT_PHASE2 = SYSTEM_PROMPT_BASE + """
 ・「私はこう考えたんだけど、あなたは？」「そこ、なんでそうしたの？」のような自然な対話スタイル
 ・学習者のプログラムと自分の（架空の）考えを比較して、違いや疑問を投げかける
 ・間違いを指摘するのではなく、「あれ、これだとどうなる？」と一緒に考える姿勢で
-"""
-
-SYSTEM_PROMPT_PHASE3 = SYSTEM_PROMPT_BASE + """
+""",
+    "phase3_extra": """
 【あなたの役割：確認のサポーター】
 今は「実際にプログラムを動かして確認する」フェーズです。
 
 ・4つのシナリオ（昼夜×人あり/なし）を順番に確認するよう促す
 ・「このシナリオでは正しく動いた？」「他のパターンも試してみた？」と確認を促す
 ・シミュレーション結果を見ながら、なぜそうなるのかを一緒に考える
-"""
-
-SYSTEM_PROMPT_PHASE4 = SYSTEM_PROMPT_BASE + """
+""",
+    "phase4_extra": """
 【あなたの役割：全体対話のファシリテーター】
 今は「全体で対話する」フェーズです。クラス全員が集まって話し合う場を演出してください。
 
@@ -126,17 +133,40 @@ SYSTEM_PROMPT_PHASE4 = SYSTEM_PROMPT_BASE + """
 
 ・他者のプログラムを批判的に検討することで、自分のプログラムも見直すよう促す
 ・「あなたのプログラムはこのパターンと違う？どこが違う？」と比較させる
-"""
+""",
+}
+
+
+def load_prompts() -> dict:
+    """カスタムプロンプトをファイルから読み込む。なければデフォルトを返す。"""
+    if PROMPT_FILE.exists():
+        try:
+            with PROMPT_FILE.open(encoding="utf-8") as f:
+                stored = json.load(f)
+            # デフォルトのキーを補完しつつ返す
+            merged = {**DEFAULT_PROMPTS, **stored}
+            return merged
+        except Exception:
+            pass
+    return dict(DEFAULT_PROMPTS)
+
+
+def save_prompts(prompts: dict):
+    PROMPT_FILE.parent.mkdir(exist_ok=True)
+    with PROMPT_FILE.open("w", encoding="utf-8") as f:
+        json.dump(prompts, f, ensure_ascii=False, indent=2)
 
 
 def get_system_prompt(phase: int) -> str:
+    p = load_prompts()
+    base = p.get("base", DEFAULT_PROMPTS["base"])
     if phase == 2:
-        return SYSTEM_PROMPT_PHASE2
+        return base + p.get("phase2_extra", DEFAULT_PROMPTS["phase2_extra"])
     elif phase == 3:
-        return SYSTEM_PROMPT_PHASE3
+        return base + p.get("phase3_extra", DEFAULT_PROMPTS["phase3_extra"])
     elif phase == 4:
-        return SYSTEM_PROMPT_PHASE4
-    return SYSTEM_PROMPT_PHASE2
+        return base + p.get("phase4_extra", DEFAULT_PROMPTS["phase4_extra"])
+    return base + p.get("phase2_extra", DEFAULT_PROMPTS["phase2_extra"])
 
 
 def build_system_instruction(phase: int, req: "AdviceRequest") -> str:
@@ -342,6 +372,93 @@ async def get_advice(req: AdviceRequest):
             return {"message": f"Gemini API エラー: {e}"}
 
     return {"message": fallback_response(req)}
+
+
+# --- Prompt config endpoint ---
+
+class PromptsConfig(BaseModel):
+    base: str
+    phase2_extra: str
+    phase3_extra: str
+    phase4_extra: str
+
+
+@app.get("/api/config/prompts")
+async def get_prompts_config():
+    p = load_prompts()
+    return {
+        "base": p.get("base", DEFAULT_PROMPTS["base"]),
+        "phase2_extra": p.get("phase2_extra", DEFAULT_PROMPTS["phase2_extra"]),
+        "phase3_extra": p.get("phase3_extra", DEFAULT_PROMPTS["phase3_extra"]),
+        "phase4_extra": p.get("phase4_extra", DEFAULT_PROMPTS["phase4_extra"]),
+    }
+
+
+@app.post("/api/config/prompts")
+async def update_prompts_config(config: PromptsConfig):
+    save_prompts(config.model_dump())
+    return {"status": "ok"}
+
+
+@app.post("/api/config/prompts/reset")
+async def reset_prompts_config():
+    if PROMPT_FILE.exists():
+        PROMPT_FILE.unlink()
+    return {"status": "ok", "message": "デフォルトにリセットしました"}
+
+
+# --- Log endpoint ---
+
+DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
+LOG_FILE = DATA_DIR / "sessions.jsonl"
+
+
+class LogEntry(BaseModel):
+    session_id: str
+    event: str          # "phase_complete" | "session_end"
+    phase: int
+    rules: List[Rule]
+    chat_history: List[ChatMessage]
+    all_correct: bool
+
+
+@app.post("/api/log")
+async def save_log(entry: LogEntry):
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "session_id": entry.session_id,
+        "event": entry.event,
+        "phase": entry.phase,
+        "rules": [
+            {
+                "conditions": [c.type for c in r.conditions],
+                "action": r.action,
+            }
+            for r in entry.rules
+        ],
+        "chat_history": [
+            {"role": m.role, "text": m.text}
+            for m in entry.chat_history
+        ],
+        "all_correct": entry.all_correct,
+    }
+    with LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return {"status": "ok"}
+
+
+@app.get("/api/log/export")
+async def export_log():
+    if not LOG_FILE.exists():
+        return []
+    entries = []
+    with LOG_FILE.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                entries.append(json.loads(line))
+    return entries
 
 
 @app.get("/")
