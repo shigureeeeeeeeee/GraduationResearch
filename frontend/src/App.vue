@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, nextTick, reactive } from 'vue'
+import { ref, computed, nextTick, reactive, watch } from 'vue'
 
 // ─────────────────────────────────────────────
 // セッション管理
@@ -371,6 +371,43 @@ async function requestAdvice() {
     await scrollToBottom()
   }
 }
+
+// ─────────────────────────────────────────────
+// ルール変更の自動検知 → AIが自動でコメント
+// ─────────────────────────────────────────────
+const ruleAwareMsg = ref('')
+let autoAdviceTimer = null
+let autoAdviceRunning = false  // 重複防止フラグ
+
+watch(
+  rulesForApi,
+  () => {
+    if (!currentPhaseData.value.showChat) return
+
+    ruleAwareMsg.value = 'ルールを認識中...'
+    clearTimeout(autoAdviceTimer)
+
+    autoAdviceTimer = setTimeout(async () => {
+      if (isLoading.value || autoAdviceRunning) return
+
+      autoAdviceRunning = true
+      ruleAwareMsg.value = 'ルールをAIに送信中...'
+      isLoading.value = true
+      try {
+        const data = await callAdviceApi('プログラムを更新したよ。')
+        chatMessages.value.push({ id: Date.now(), role: 'ai', text: data.message })
+        ruleAwareMsg.value = 'AIがルールを認識しています'
+      } catch {
+        ruleAwareMsg.value = 'AI接続エラー'
+      } finally {
+        isLoading.value = false
+        autoAdviceRunning = false
+        await scrollToBottom()
+      }
+    }, 1500)
+  },
+  { deep: true }
+)
 </script>
 
 <template>
@@ -475,7 +512,14 @@ async function requestAdvice() {
     <main class="main-grid" :class="{ 'no-chat': !currentPhaseData.showChat }">
       <!-- ① プログラム構築 -->
       <section class="panel panel-builder">
-        <h2 class="panel-title">プログラム構築</h2>
+        <div class="panel-title-row">
+          <h2 class="panel-title">プログラム構築</h2>
+          <span
+            v-if="currentPhaseData.showChat && ruleAwareMsg"
+            class="rule-aware-badge"
+            :class="{ 'badge-loading': ruleAwareMsg.includes('中') }"
+          >{{ ruleAwareMsg }}</span>
+        </div>
         <p class="panel-desc">
           条件（センサー）とアクションを選んでルールを作ろう。<br>
           複数のルールが同時に発動することもあるよ。
@@ -917,6 +961,38 @@ body {
   color: var(--clr-muted);
   margin-bottom: 16px;
   line-height: 1.5;
+}
+
+/* ── Panel title row ── */
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.panel-title-row .panel-title { margin-bottom: 0; }
+
+.rule-aware-badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 20px;
+  background: #d1fae5;
+  color: #065f46;
+  border: 1px solid #6ee7b7;
+  white-space: nowrap;
+  transition: background 0.3s;
+}
+.rule-aware-badge.badge-loading {
+  background: #fef3c7;
+  color: #92400e;
+  border-color: #fcd34d;
+  animation: pulse-badge 1s infinite;
+}
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
 }
 
 /* ── Rules ── */

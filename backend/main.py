@@ -81,12 +81,18 @@ SYSTEM_PROMPT_BASE = """\
 【複数ルールの動作】
   全てのルールを評価し、条件を満たすルールのアクションを全て実行する。
 
+【重要：プログラムの把握について】
+あなたは「=== 学習者が現在作っているプログラム ===」セクションを常に参照できます。
+学習者に「どんなルールにしたの？」「教えてください」などとルール内容を聞き返してはいけません。
+必ずシステムに記載されたルールを読んだ上で、その内容に具体的に言及して話しかけてください。
+
 【共通ルール】
 1. 正解のルール構成を直接教えない
-2. 問いかけは 1〜2 個に絞る
+2. 問いかけは最後に1〜2個まとめる（会話の途中で終わらせない）
 3. 学習者を励ます言葉を添える
 4. 全シナリオ正解なら素直に称賛する
 5. 会話の流れを踏まえて前の返答に応じた反応をする
+6. 応答は必ず文章を最後まで完結させること
 """
 
 
@@ -178,19 +184,23 @@ def build_system_instruction(phase: int, req: "AdviceRequest") -> str:
     env_label = f"{'夜' if req.environment.isDark else '昼'} × {'人あり' if req.environment.personPresent else '人なし'}"
 
     program_context = f"""
-=== 学習者が現在作っているプログラム ===
+========================================
+【現在の学習者のプログラム（必ず読むこと）】
+========================================
 {rules_str}
 
-=== 全シナリオのシミュレーション結果 ===
+【全シナリオのシミュレーション結果】
 {scenarios_str}
 
-=== 現在選択中の環境 ===
+【現在選択中の環境】
   {env_label}
   ドア: {'開いている' if req.result.doorOpen else '閉まっている'} {'（正しい）' if req.result.doorCorrect else '（間違い）'}
   チャイム: {'鳴っている' if req.result.bellRinging else '静か'} {'（正しい）' if req.result.bellCorrect else '（間違い）'}
   全体判定: {'全シナリオ正解' if req.result.allCorrect else '不正解あり'}
+========================================
 
-このプログラムの状態を常に念頭に置いて対話してください。
+上記のプログラム内容をすでに把握した前提で対話してください。
+学習者にルールの内容を聞き返してはいけません。
 """
     return role_prompt + program_context
 
@@ -335,7 +345,7 @@ async def get_advice(req: AdviceRequest):
     api_key = os.environ.get("GEMINI_API_KEY")
 
     # 今回送るメッセージ（未指定ならアドバイスリクエスト扱い）
-    message_to_send = req.current_message or "今のプログラムについてコメントしてください。"
+    user_text = req.current_message or "今のプログラムについてコメントしてください。"
 
     if api_key:
         try:
@@ -357,11 +367,20 @@ async def get_advice(req: AdviceRequest):
             # プログラム状態をシステム指示に組み込む
             system_instruction = build_system_instruction(req.phase or 2, req)
 
+            # ルール情報をメッセージ本文にも埋め込む（AIがシステム指示を無視しても確実に見える）
+            rules_str = describe_rules(req.rules)
+            scenarios_str = describe_scenarios(req.rules)
+            message_to_send = (
+                f"[現在のプログラム]\n{rules_str}\n\n"
+                f"[全シナリオ結果]\n{scenarios_str}\n\n"
+                f"[メッセージ]\n{user_text}"
+            )
+
             chat = client.chats.create(
                 model="gemini-2.5-flash",
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
-                    max_output_tokens=400,
+                    max_output_tokens=2048,
                     temperature=0.7,
                 ),
                 history=history,
