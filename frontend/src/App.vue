@@ -176,6 +176,17 @@ const SCENARIOS = [
 // プログラム構築
 // ─────────────────────────────────────────────
 const rules = ref([])
+const aiProgramDraft = ref([])
+
+const conditionLabelMap = {
+  person_sensor: '人感センサーON（人がいる）',
+  dark_sensor: '明るさセンサーON（夜・暗い）',
+}
+
+const actionLabelMap = {
+  door: 'ドアを開ける',
+  bell: 'チャイムを鳴らす',
+}
 
 function addRule() {
   rules.value.push({
@@ -214,6 +225,41 @@ function toggleCondition(rule, condType) {
 
 function hasCondition(rule, condType) {
   return rule.conditions.some((c) => c.type === condType)
+}
+
+function normalizeDraftRule(rule) {
+  if (!rule || !Array.isArray(rule.conditions) || !rule.action) return null
+  const normalizedConditions = rule.conditions
+    .map((c) => c?.type)
+    .filter((t) => t === 'person_sensor' || t === 'dark_sensor')
+  if (normalizedConditions.length === 0) return null
+  if (rule.action !== 'door' && rule.action !== 'bell') return null
+  return {
+    conditions: normalizedConditions.map((type) => ({ type })),
+    action: rule.action,
+  }
+}
+
+function updateAiProgramDraft(data) {
+  if (!data || !Array.isArray(data.program_draft)) return
+  aiProgramDraft.value = data.program_draft
+    .map((r) => normalizeDraftRule(r))
+    .filter(Boolean)
+}
+
+function formatDraftConditions(rule) {
+  return rule.conditions
+    .map((c) => conditionLabelMap[c.type] || c.type)
+    .join(' AND ')
+}
+
+function applyAiDraftToRules() {
+  if (aiProgramDraft.value.length === 0) return
+  rules.value = aiProgramDraft.value.map((r, idx) => ({
+    id: `${Date.now()}-${idx}`,
+    conditions: r.conditions.map((c) => ({ type: c.type })),
+    action: r.action,
+  }))
 }
 
 // API 送信用フォーマット
@@ -333,6 +379,7 @@ async function sendMessage() {
   isLoading.value = true
   try {
     const data = await callAdviceApi(text)
+    updateAiProgramDraft(data)
     chatMessages.value.push({ id: Date.now() + 1, role: 'ai', text: data.message })
   } catch {
     chatMessages.value.push({
@@ -359,6 +406,7 @@ async function requestAdvice() {
   try {
     // current_message なし → バックエンドがアドバイスリクエストとして処理
     const data = await callAdviceApi(null)
+    updateAiProgramDraft(data)
     chatMessages.value.push({ id: Date.now(), role: 'ai', text: data.message })
   } catch {
     chatMessages.value.push({
@@ -395,6 +443,7 @@ watch(
       isLoading.value = true
       try {
         const data = await callAdviceApi('プログラムを更新したよ。')
+        updateAiProgramDraft(data)
         chatMessages.value.push({ id: Date.now(), role: 'ai', text: data.message })
         ruleAwareMsg.value = 'AIがルールを認識しています'
       } catch {
@@ -584,6 +633,29 @@ watch(
 
           <div v-if="rules.length === 0" class="empty-hint">
             まだルールがありません。「＋ ルールを追加」から作り始めよう！
+          </div>
+        </div>
+
+        <div v-if="aiProgramDraft.length > 0" class="ai-draft-box">
+          <div class="ai-draft-header">
+            <span class="ai-draft-title">AIがこの問題で考えたプログラム</span>
+            <button class="btn-apply-draft" @click="applyAiDraftToRules">
+              この考えを反映
+            </button>
+          </div>
+          <div class="ai-draft-list">
+            <div
+              v-for="(rule, idx) in aiProgramDraft"
+              :key="`draft-${idx}`"
+              class="ai-draft-item"
+            >
+              <span class="ai-draft-number">AI案 {{ idx + 1 }}</span>
+              <div class="ai-draft-flow">
+                <span class="ai-draft-chip">{{ formatDraftConditions(rule) }}</span>
+                <span class="ai-draft-arrow">→</span>
+                <span class="ai-draft-chip action">{{ actionLabelMap[rule.action] || rule.action }}</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1148,6 +1220,79 @@ body {
   transition: background 0.15s, transform 0.1s;
 }
 .btn-add:hover { background: var(--clr-primary-dark); transform: translateY(-1px); }
+
+.ai-draft-box {
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  border-radius: 10px;
+}
+.ai-draft-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ai-draft-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #1e40af;
+}
+.btn-apply-draft {
+  border: none;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: white;
+  background: #2563eb;
+  cursor: pointer;
+}
+.btn-apply-draft:hover { background: #1d4ed8; }
+.ai-draft-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ai-draft-item {
+  background: white;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  padding: 8px;
+}
+.ai-draft-number {
+  display: inline-block;
+  margin-bottom: 6px;
+  font-size: 0.72rem;
+  color: #1d4ed8;
+  font-weight: 700;
+}
+.ai-draft-flow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ai-draft-chip {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  background: #e0e7ff;
+  color: #1e3a8a;
+  font-weight: 600;
+}
+.ai-draft-chip.action {
+  background: #ffedd5;
+  color: #9a3412;
+}
+.ai-draft-arrow {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #334155;
+}
 
 /* ── Simulation ── */
 .env-selector { margin-bottom: 16px; display: flex; flex-direction: column; gap: 10px; }

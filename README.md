@@ -33,7 +33,7 @@
 
 - **フロントエンド**: Vue 3 (Composition API) + Vite
 - **バックエンド**: Python / FastAPI（ポート 8001）
-- **LLM**: OpenAI API (`gpt-4o-mini`) ／ 未設定時はルールベースのフォールバック応答
+- **LLM**: Gemini API / Ollama（ローカルLLM）/ ルールベースフォールバック
 
 ---
 
@@ -51,15 +51,40 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 # 依存関係インストール
 pip install -r requirements.txt
 
-# (任意) OpenAI API キーを設定
+# (任意) LLM設定
 cp .env.example .env
-# .env を編集して OPENAI_API_KEY を設定
+# .env を編集して LLM_PROVIDER と各種キー/モデルを設定
+# 例:
+#   LLM_PROVIDER=gemini  -> GEMINI_API_KEY を使用
+#   LLM_PROVIDER=ollama  -> OLLAMA_MODEL を使用
+#   LLM_PROVIDER=auto    -> Gemini優先、なければOllama、最後にfallback
 
 # サーバー起動（ポート 8001）
 uvicorn main:app --reload --port 8001
 ```
 
 バックエンドは http://localhost:8001 で起動します。
+
+### 1.5 Ollama を使う場合（任意）
+
+ローカルLLMを使う場合は、別ターミナルで Ollama を起動しておきます。
+
+```bash
+ollama serve
+ollama pull qwen2.5:7b-instruct
+```
+
+`.env` の例:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen2.5:7b-instruct
+AI_INCLUDE_PROGRAM_DRAFT=true
+AI_PROGRAM_DRAFT_MAX_RULES=1
+```
+
+`AI_INCLUDE_PROGRAM_DRAFT=true` のとき、AI応答の末尾に「AIの仮説プログラム」（ルール案）が表示されます。
 
 ### 2. フロントエンド
 

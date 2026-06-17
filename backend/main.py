@@ -4,6 +4,9 @@ from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
 import os
 import json
+import re
+from urllib import request as urllib_request
+from urllib import error as urllib_error
 from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
@@ -202,7 +205,45 @@ def build_system_instruction(phase: int, req: "AdviceRequest") -> str:
 上記のプログラム内容をすでに把握した前提で対話してください。
 学習者にルールの内容を聞き返してはいけません。
 """
-    return role_prompt + program_context
+    return role_prompt + program_context + build_program_draft_instruction()
+
+
+def build_program_draft_instruction() -> str:
+    """
+    応答末尾に「AIがこの問題で考えたプログラム」セクションを付ける追加指示。
+    AI_INCLUDE_PROGRAM_DRAFT=false で無効化できる。
+    """
+    enabled = os.environ.get("AI_INCLUDE_PROGRAM_DRAFT", "true").strip().lower() not in ("0", "false", "off")
+    if not enabled:
+        return ""
+
+    max_rules = os.environ.get("AI_PROGRAM_DRAFT_MAX_RULES", "1").strip()
+    if not max_rules.isdigit():
+        max_rules = "2"
+
+    return f"""
+
+【出力フォーマット（必須）】
+応答は次の2部構成にしてください。
+1) 学習者への問いかけ・コメント
+2) 「AIがこの問題で考えたプログラム」
+
+重要:
+- あなたは学習者より上の立場ではなく、同じ学習者レベルの対話相手として話す
+- 「正解を教える先生」ではなく「自分はこう考えたけど、どう思う？」という姿勢を守る
+- 断定や採点口調は使わない（例: 「これは間違い」「正解は〜」は避ける）
+
+「AIがこの問題で考えたプログラム」では、以下の形式を必ず使ってください。
+- ルール1: [条件] → [アクション]
+- ルール2: [条件] → [アクション]
+- 考えた理由: （1〜2文）
+
+制約:
+- 仮説ルールは最大{max_rules}個まで
+- 「私ならこうする」「私はこう考えた」を使って提示する
+- 学習者の現在ルールとの差分が分かるように簡潔に書く
+- 学習者の現在ルールをそのまま復唱しただけの案は禁止（最低1つ差分を入れる）
+"""
 
 
 def describe_rules(rules: List[Rule]) -> str:
@@ -280,6 +321,238 @@ def build_user_message(req: AdviceRequest) -> str:
 """
 
 
+# --- LLM helpers ---
+
+def get_llm_provider() -> str:
+    """
+    LLMプロバイダを返す。
+    auto: GEMINI_API_KEY があれば gemini、なければ OLLAMA_MODEL があれば ollama、最後に fallback。
+    """
+    provider = os.environ.get("LLM_PROVIDER", "auto").strip().lower()
+
+    if provider in ("gemini", "ollama", "fallback"):
+        return provider
+
+    has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
+    has_ollama = bool(os.environ.get("OLLAMA_MODEL"))
+    if has_gemini:
+        return "gemini"
+    if has_ollama:
+        return "ollama"
+    return "fallback"
+
+
+def build_message_payload(user_text: str, req: AdviceRequest) -> str:
+    rules_str = describe_rules(req.rules)
+    scenarios_str = describe_scenarios(req.rules)
+    return (
+        f"[現在のプログラム]\n{rules_str}\n\n"
+        f"[全シナリオ結果]\n{scenarios_str}\n\n"
+        f"[メッセージ]\n{user_text}"
+    )
+
+
+def generate_with_gemini(req: AdviceRequest, user_text: str) -> str:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY が未設定です")
+
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=api_key)
+    history = []
+    for msg in (req.history or [])[-10:]:
+        history.append(
+            types.Content(
+                role="user" if msg.role == "user" else "model",
+                parts=[types.Part(text=msg.text)],
+            )
+        )
+
+    system_instruction = build_system_instruction(req.phase or 2, req)
+    message_to_send = build_message_payload(user_text, req)
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+    chat = client.chats.create(
+        model=model_name,
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            max_output_tokens=2048,
+            temperature=0.7,
+        ),
+        history=history,
+    )
+    response = chat.send_message(message_to_send)
+    return response.text
+
+
+def generate_with_ollama(req: AdviceRequest, user_text: str) -> str:
+    model_name = os.environ.get("OLLAMA_MODEL")
+    if not model_name:
+        raise ValueError("OLLAMA_MODEL が未設定です")
+
+    base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    timeout_seconds = int(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "60"))
+    system_instruction = build_system_instruction(req.phase or 2, req)
+    message_to_send = build_message_payload(user_text, req)
+
+    messages = [{"role": "system", "content": system_instruction}]
+    for msg in (req.history or [])[-10:]:
+        role = "assistant" if msg.role == "ai" else "user"
+        messages.append({"role": role, "content": msg.text})
+    messages.append({"role": "user", "content": message_to_send})
+
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": 0.7},
+    }
+
+    req_obj = urllib_request.Request(
+        url=f"{base_url.rstrip('/')}/api/chat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(req_obj, timeout=timeout_seconds) as resp:
+            raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
+    except urllib_error.URLError as e:
+        raise RuntimeError(f"Ollama 接続エラー: {e}") from e
+
+    content = data.get("message", {}).get("content")
+    if not content:
+        raise RuntimeError("Ollama 応答が空でした")
+    return content
+
+
+def parse_program_draft_from_message(message: str) -> Dict[str, Any]:
+    """
+    AI応答から「AIの仮説プログラム」セクションを抽出し、UI用に構造化する。
+    返り値:
+      - message: チャット表示用本文（仮説セクション除去後）
+      - program_draft: [{conditions:[{type}], action}] 形式
+    """
+    headers = ["AIがこの問題で考えたプログラム", "AIの仮説プログラム"]
+    idx = -1
+    found_header = ""
+    for h in headers:
+        pos = message.find(h)
+        if pos >= 0 and (idx < 0 or pos < idx):
+            idx = pos
+            found_header = h
+    body = message.strip()
+    draft_block = message
+    if idx >= 0:
+        body = message[:idx].strip()
+        if not body:
+            body = "AIがこの問題で考えたプログラムを更新しました。下の提案を確認してください。"
+        draft_block = message[idx + len(found_header):]
+
+    cond_map = {
+        "人感センサーON": "person_sensor",
+        "人感センサー": "person_sensor",
+        "明るさセンサーON（夜）": "dark_sensor",
+        "明るさセンサーON": "dark_sensor",
+        "明るさセンサー": "dark_sensor",
+        "夜": "dark_sensor",
+    }
+    action_map = {
+        "ドアを開ける": "door",
+        "チャイムを鳴らす": "bell",
+    }
+
+    max_rules_env = os.environ.get("AI_PROGRAM_DRAFT_MAX_RULES", "1").strip()
+    max_rules = int(max_rules_env) if max_rules_env.isdigit() and int(max_rules_env) > 0 else 1
+
+    draft_rules: List[Dict[str, Any]] = []
+    seen = set()
+    for line in draft_block.splitlines():
+        m = re.search(r"ルール\d+\s*:\s*\[(.*?)\]\s*→\s*\[(.*?)\]", line.strip())
+        if not m:
+            continue
+
+        cond_text = m.group(1).strip()
+        action_text = m.group(2).strip()
+        action = action_map.get(action_text)
+        if not action:
+            continue
+
+        parts = [p.strip() for p in re.split(r"\s*(?:AND|and|＆|&|かつ)\s*", cond_text) if p.strip()]
+        cond_types: List[str] = []
+        for p in parts:
+            ctype = cond_map.get(p)
+            if ctype and ctype not in cond_types:
+                cond_types.append(ctype)
+
+        if not cond_types:
+            continue
+
+        key = (tuple(sorted(cond_types)), action)
+        if key in seen:
+            continue
+        seen.add(key)
+        draft_rules.append(
+            {
+                "conditions": [{"type": c} for c in cond_types],
+                "action": action,
+            }
+        )
+        if len(draft_rules) >= max_rules:
+            break
+
+    return {"message": body, "program_draft": draft_rules}
+
+
+def _rule_signature_from_api_rule(rule: Dict[str, Any]) -> tuple:
+    conds = tuple(sorted(c.get("type") for c in rule.get("conditions", []) if c.get("type")))
+    action = rule.get("action")
+    return conds, action
+
+
+def _rule_signature_from_req_rule(rule: Rule) -> tuple:
+    conds = tuple(sorted(c.type for c in rule.conditions if c.type))
+    return conds, rule.action
+
+
+def build_non_repetitive_draft(req: AdviceRequest, parsed: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    学習者の現ルールをそのまま復唱したAI案を除去し、
+    可能なら差分のある1件を返す。
+    """
+    current_signatures = {_rule_signature_from_req_rule(r) for r in req.rules}
+    candidates = parsed.get("program_draft", []) or []
+
+    filtered = []
+    for r in candidates:
+        if _rule_signature_from_api_rule(r) not in current_signatures:
+            filtered.append(r)
+
+    if filtered:
+        return {"message": parsed.get("message", ""), "program_draft": filtered[:1]}
+
+    # 差分候補をドメイン知識から1件だけ補完（復唱対策）
+    canonical_candidates = [
+        {
+            "conditions": [{"type": "person_sensor"}],
+            "action": "door",
+        },
+        {
+            "conditions": [{"type": "person_sensor"}, {"type": "dark_sensor"}],
+            "action": "bell",
+        },
+    ]
+    for c in canonical_candidates:
+        if _rule_signature_from_api_rule(c) not in current_signatures:
+            return {"message": parsed.get("message", ""), "program_draft": [c]}
+
+    return {"message": parsed.get("message", ""), "program_draft": []}
+
+
 # --- Fallback responses ---
 
 def fallback_response(req: AdviceRequest) -> str:
@@ -342,55 +615,27 @@ def fallback_response(req: AdviceRequest) -> str:
 
 @app.post("/api/advice")
 async def get_advice(req: AdviceRequest):
-    api_key = os.environ.get("GEMINI_API_KEY")
-
     # 今回送るメッセージ（未指定ならアドバイスリクエスト扱い）
     user_text = req.current_message or "今のプログラムについてコメントしてください。"
+    provider = get_llm_provider()
 
-    if api_key:
+    if provider == "gemini":
         try:
-            from google import genai
-            from google.genai import types
-
-            client = genai.Client(api_key=api_key)
-
-            # 過去の会話履歴を Gemini 形式に変換（直近10件）
-            history = []
-            for msg in (req.history or [])[-10:]:
-                history.append(
-                    types.Content(
-                        role="user" if msg.role == "user" else "model",
-                        parts=[types.Part(text=msg.text)],
-                    )
-                )
-
-            # プログラム状態をシステム指示に組み込む
-            system_instruction = build_system_instruction(req.phase or 2, req)
-
-            # ルール情報をメッセージ本文にも埋め込む（AIがシステム指示を無視しても確実に見える）
-            rules_str = describe_rules(req.rules)
-            scenarios_str = describe_scenarios(req.rules)
-            message_to_send = (
-                f"[現在のプログラム]\n{rules_str}\n\n"
-                f"[全シナリオ結果]\n{scenarios_str}\n\n"
-                f"[メッセージ]\n{user_text}"
-            )
-
-            chat = client.chats.create(
-                model="gemini-2.5-flash",
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    max_output_tokens=2048,
-                    temperature=0.7,
-                ),
-                history=history,
-            )
-            response = chat.send_message(message_to_send)
-            return {"message": response.text}
+            generated = generate_with_gemini(req, user_text)
+            parsed = parse_program_draft_from_message(generated)
+            return build_non_repetitive_draft(req, parsed)
         except Exception as e:
-            return {"message": f"Gemini API エラー: {e}"}
+            return {"message": f"Gemini API エラー: {e}", "program_draft": []}
 
-    return {"message": fallback_response(req)}
+    if provider == "ollama":
+        try:
+            generated = generate_with_ollama(req, user_text)
+            parsed = parse_program_draft_from_message(generated)
+            return build_non_repetitive_draft(req, parsed)
+        except Exception as e:
+            return {"message": f"Ollama API エラー: {e}", "program_draft": []}
+
+    return {"message": fallback_response(req), "program_draft": []}
 
 
 # --- Prompt config endpoint ---
