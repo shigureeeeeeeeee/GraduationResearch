@@ -33,6 +33,10 @@ async function saveLog(event, phase) {
 const settingsOpen = ref(false)
 const settingsSaving = ref(false)
 const settingsMsg = ref('')
+const settingsTab = ref('prompts')
+const dashboardLoading = ref(false)
+const dashboardMsg = ref('')
+const logEntries = ref([])
 const prompts = reactive({
   base: '',
   phase2_extra: '',
@@ -49,13 +53,119 @@ const PHASE_PROMPT_LABELS = [
 async function openSettings() {
   settingsOpen.value = true
   settingsMsg.value = ''
+  dashboardMsg.value = ''
   try {
     const res = await fetch('http://localhost:8001/api/config/prompts')
     const data = await res.json()
     Object.assign(prompts, data)
+    await loadDashboard()
   } catch {
     settingsMsg.value = 'プロンプト設定の読み込みに失敗しました'
   }
+}
+
+async function loadDashboard() {
+  dashboardLoading.value = true
+  dashboardMsg.value = ''
+  try {
+    const res = await fetch('http://localhost:8001/api/log/export')
+    logEntries.value = await res.json()
+  } catch {
+    dashboardMsg.value = 'ログの読み込みに失敗しました'
+  } finally {
+    dashboardLoading.value = false
+  }
+}
+
+const sessionRows = computed(() => {
+  const bySession = new Map()
+  for (const entry of logEntries.value) {
+    const current = bySession.get(entry.session_id)
+    if (!current || new Date(entry.timestamp) > new Date(current.timestamp)) {
+      bySession.set(entry.session_id, entry)
+    }
+  }
+  return [...bySession.values()]
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    .map((entry) => {
+      const chatCount = (entry.chat_history || []).length
+      const userChatCount = (entry.chat_history || []).filter((m) => m.role === 'user').length
+      return {
+        ...entry,
+        shortId: entry.session_id.slice(-8),
+        finished: entry.event === 'session_end',
+        ruleCount: (entry.rules || []).length,
+        chatCount,
+        userChatCount,
+        timestampLabel: new Date(entry.timestamp).toLocaleString('ja-JP'),
+      }
+    })
+})
+
+const dashboardSummary = computed(() => {
+  const rows = sessionRows.value
+  const total = rows.length
+  const completed = rows.filter((r) => r.finished).length
+  const allCorrect = rows.filter((r) => r.all_correct).length
+  const avgChat = total
+    ? (rows.reduce((sum, r) => sum + r.chatCount, 0) / total).toFixed(1)
+    : '0.0'
+  return { total, completed, allCorrect, avgChat }
+})
+
+function downloadLogJson() {
+  const blob = new Blob([JSON.stringify(logEntries.value, null, 2)], {
+    type: 'application/json',
+  })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `experiment-logs-${new Date().toISOString().slice(0, 10)}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function escapeCsvValue(value) {
+  const text = value == null ? '' : String(value)
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`
+  }
+  return text
+}
+
+function downloadLogCsv() {
+  const headers = [
+    'session_id',
+    'final_phase',
+    'finished',
+    'all_correct',
+    'rule_count',
+    'chat_count',
+    'user_chat_count',
+    'last_saved_at',
+  ]
+  const rows = sessionRows.value.map((row) => [
+    row.session_id,
+    row.phase,
+    row.finished,
+    row.all_correct,
+    row.ruleCount,
+    row.chatCount,
+    row.userChatCount,
+    row.timestamp,
+  ])
+  const csv = [headers, ...rows]
+    .map((row) => row.map((cell) => escapeCsvValue(cell)).join(','))
+    .join('\n')
+  const blob = new Blob([`\uFEFF${csv}`], {
+    type: 'text/csv;charset=utf-8',
+  })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `experiment-summary-${new Date().toISOString().slice(0, 10)}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 async function saveSettings() {
@@ -469,14 +579,35 @@ watch(
       <div v-if="settingsOpen" class="settings-overlay" @click.self="settingsOpen = false">
         <div class="settings-drawer">
           <div class="settings-header">
-            <h2 class="settings-title">実験者設定 - AIプロンプト編集</h2>
+            <h2 class="settings-title">実験者設定</h2>
             <button class="settings-close" @click="settingsOpen = false">×</button>
           </div>
+          <div class="settings-tabs">
+            <button
+              class="settings-tab"
+              :class="{ active: settingsTab === 'prompts' }"
+              @click="settingsTab = 'prompts'"
+            >
+              AIプロンプト
+            </button>
+            <button
+              class="settings-tab"
+              :class="{ active: settingsTab === 'dashboard' }"
+              @click="settingsTab = 'dashboard'; loadDashboard()"
+            >
+              ログダッシュボード
+            </button>
+          </div>
           <p class="settings-note">
-            ここで編集したプロンプトはバックエンドに保存され、次のAI応答から反映されます。
+            <template v-if="settingsTab === 'prompts'">
+              ここで編集したプロンプトはバックエンドに保存され、次のAI応答から反映されます。
+            </template>
+            <template v-else>
+              保存された実験ログから、セッション数や正解状況、AIとの会話数を確認できます。
+            </template>
           </p>
 
-          <div class="settings-body">
+          <div v-if="settingsTab === 'prompts'" class="settings-body">
             <div
               v-for="item in PHASE_PROMPT_LABELS"
               :key="item.key"
@@ -492,7 +623,77 @@ watch(
             </div>
           </div>
 
-          <div class="settings-footer">
+          <div v-else class="settings-body dashboard-body">
+            <div class="dashboard-actions">
+              <button class="btn-reset-prompt" @click="loadDashboard" :disabled="dashboardLoading">
+                {{ dashboardLoading ? '読み込み中...' : '再読み込み' }}
+              </button>
+              <button class="btn-save-prompt" @click="downloadLogJson" :disabled="logEntries.length === 0">
+                JSONをダウンロード
+              </button>
+              <button class="btn-save-prompt" @click="downloadLogCsv" :disabled="sessionRows.length === 0">
+                CSVをダウンロード
+              </button>
+            </div>
+
+            <div v-if="dashboardMsg" class="dashboard-error">{{ dashboardMsg }}</div>
+
+            <div class="dashboard-summary-grid">
+              <div class="dashboard-card">
+                <span class="dashboard-card-label">セッション数</span>
+                <strong>{{ dashboardSummary.total }}</strong>
+              </div>
+              <div class="dashboard-card">
+                <span class="dashboard-card-label">完了セッション</span>
+                <strong>{{ dashboardSummary.completed }}</strong>
+              </div>
+              <div class="dashboard-card">
+                <span class="dashboard-card-label">全シナリオ正解</span>
+                <strong>{{ dashboardSummary.allCorrect }}</strong>
+              </div>
+              <div class="dashboard-card">
+                <span class="dashboard-card-label">平均会話数</span>
+                <strong>{{ dashboardSummary.avgChat }}</strong>
+              </div>
+            </div>
+
+            <div v-if="sessionRows.length === 0" class="dashboard-empty">
+              まだ保存されたログがありません。フェーズ移動またはセッション完了時にログが保存されます。
+            </div>
+
+            <div v-else class="dashboard-table-wrap">
+              <table class="dashboard-table">
+                <thead>
+                  <tr>
+                    <th>セッション</th>
+                    <th>最終フェーズ</th>
+                    <th>状態</th>
+                    <th>正解</th>
+                    <th>ルール</th>
+                    <th>会話</th>
+                    <th>最終保存</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in sessionRows" :key="row.session_id">
+                    <td>#{{ row.shortId }}</td>
+                    <td>{{ row.phase }}</td>
+                    <td>{{ row.finished ? '完了' : '途中' }}</td>
+                    <td>
+                      <span :class="row.all_correct ? 'dash-ok' : 'dash-ng'">
+                        {{ row.all_correct ? '正解' : '未達' }}
+                      </span>
+                    </td>
+                    <td>{{ row.ruleCount }}</td>
+                    <td>{{ row.chatCount }}</td>
+                    <td>{{ row.timestampLabel }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div v-if="settingsTab === 'prompts'" class="settings-footer">
             <span v-if="settingsMsg" class="settings-msg">{{ settingsMsg }}</span>
             <button class="btn-reset-prompt" @click="resetSettings" :disabled="settingsSaving">
               デフォルトに戻す
@@ -1717,6 +1918,30 @@ body {
 }
 .settings-close:hover { background: var(--clr-border); }
 
+.settings-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 12px 24px 0;
+  border-bottom: 1px solid var(--clr-border);
+}
+.settings-tab {
+  padding: 9px 14px;
+  border: 1px solid var(--clr-border);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: var(--clr-bg);
+  color: var(--clr-muted);
+  font-size: 0.82rem;
+  font-family: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.settings-tab.active {
+  background: white;
+  color: var(--clr-primary);
+  border-color: var(--clr-primary);
+}
+
 .settings-note {
   padding: 10px 24px;
   font-size: 0.78rem;
@@ -1758,6 +1983,85 @@ body {
   border-color: var(--clr-primary);
   box-shadow: 0 0 0 3px rgba(59,111,240,0.12);
   background: white;
+}
+
+.dashboard-body { gap: 16px; }
+.dashboard-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.dashboard-error {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.dashboard-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.dashboard-card {
+  padding: 14px;
+  border: 1px solid var(--clr-border);
+  border-radius: 10px;
+  background: var(--clr-bg);
+}
+.dashboard-card-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.74rem;
+  color: var(--clr-muted);
+  font-weight: 700;
+}
+.dashboard-card strong {
+  font-size: 1.35rem;
+  color: var(--clr-text);
+}
+.dashboard-empty {
+  padding: 18px;
+  text-align: center;
+  border: 2px dashed var(--clr-border);
+  border-radius: 10px;
+  color: var(--clr-muted);
+  font-size: 0.84rem;
+}
+.dashboard-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--clr-border);
+  border-radius: 10px;
+}
+.dashboard-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  min-width: 620px;
+}
+.dashboard-table th {
+  background: var(--clr-bg);
+  color: var(--clr-muted);
+  font-weight: 800;
+  text-align: left;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--clr-border);
+  white-space: nowrap;
+}
+.dashboard-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--clr-border);
+  white-space: nowrap;
+}
+.dashboard-table tr:last-child td { border-bottom: none; }
+.dash-ok {
+  color: #047857;
+  font-weight: 800;
+}
+.dash-ng {
+  color: #b45309;
+  font-weight: 800;
 }
 
 .settings-footer {

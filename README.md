@@ -46,7 +46,7 @@ cd backend
 
 # 仮想環境を作成・有効化
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate.fish
 
 # 依存関係インストール
 pip install -r requirements.txt
