@@ -227,19 +227,66 @@ const PHASES = [
   {
     id: 4,
     label: '全体で対話する',
-    desc: 'AIがクラスの他のグループのプログラムを紹介してくれるよ。それについて意見を言ってみよう。',
+    desc: '他のグループの考えを見ながら、クラス全体で「どこがよいか・どこを直せそうか」を話し合おう。',
     showChat: true,
   },
 ]
 
 const currentPhase = ref(1)
 const currentPhaseData = computed(() => PHASES[currentPhase.value - 1])
+const isGroupPhase = computed(() => currentPhase.value === 4)
 
 const PHASE_INTRO_MESSAGES = {
   2: 'こんにちは！ペアの対話フェーズだね。\nあなたのプログラム、どんなルールにした？私のと比べてみたいな。教えてくれる？',
   3: '実行して確認するフェーズだよ！\n4つの場面（昼・人あり、昼・人なし、夜・人あり、夜・人なし）を全部チェックしてみよう。全部✓になるかな？',
-  4: 'みんなのプログラムが出揃ったところで、全体で話し合おう！\n他のグループが作ったプログラムを紹介するね。まず「今のプログラムについてアドバイスをもらう」ボタンを押してみて。',
+  4: 'ここからは全体対話だよ。\n他のグループの考えを見ながら、「このプログラムだとどんな場面で困りそうか」「自分たちの考えとどこが違うか」をクラス全体で話し合ってみよう。',
 }
+
+const GROUP_DISCUSSION_EXAMPLES = [
+  {
+    group: 'Aグループ',
+    title: '夜ならいつでもチャイム',
+    rules: ['[明るさセンサーON（夜）] → [チャイムを鳴らす]'],
+    question: '夜に人が来ていないときも、チャイムは鳴ってよいかな？',
+  },
+  {
+    group: 'Bグループ',
+    title: '夜だけドアが開く',
+    rules: ['[人感センサーON AND 明るさセンサーON（夜）] → [ドアを開ける]'],
+    question: '昼に人が来たとき、ドアはどうなるだろう？',
+  },
+  {
+    group: 'Cグループ',
+    title: 'ドアとチャイムを同じ条件にする',
+    rules: [
+      '[人感センサーON] → [ドアを開ける]',
+      '[人感センサーON] → [チャイムを鳴らす]',
+    ],
+    question: '昼に人が来たとき、チャイムまで鳴る必要はあるかな？',
+  },
+]
+
+const chatPanelTitle = computed(() =>
+  isGroupPhase.value ? '全体対話' : 'AI との対話'
+)
+
+const chatPanelDesc = computed(() =>
+  isGroupPhase.value
+    ? '他グループの考えをもとに、クラス全体で気づいたことや疑問を出し合おう。'
+    : '考えたことや疑問をAIに話しかけてみよう。\nヒントをもらいながら一緒に考えられます。'
+)
+
+const chatInputPlaceholder = computed(() =>
+  isGroupPhase.value
+    ? '全体に共有したい意見を書く（Enterで送信、Shift+Enterで改行）'
+    : 'AIに話しかける（Enterで送信、Shift+Enterで改行）'
+)
+
+const adviceButtonLabel = computed(() =>
+  isGroupPhase.value
+    ? '他グループの考えについて話題を出してもらう'
+    : '今のプログラムについてアドバイスをもらう'
+)
 
 async function advancePhase() {
   if (currentPhase.value >= 4) return
@@ -991,11 +1038,37 @@ watch(
 
       <!-- ③ AI 対話（フェーズ2以降） -->
       <section v-if="currentPhaseData.showChat" class="panel panel-chat">
-        <h2 class="panel-title">AI との対話</h2>
-        <p class="panel-desc">
-          考えたことや疑問をAIに話しかけてみよう。<br>
-          ヒントをもらいながら一緒に考えられます。
-        </p>
+        <h2 class="panel-title">{{ chatPanelTitle }}</h2>
+        <p class="panel-desc">{{ chatPanelDesc }}</p>
+
+        <div v-if="isGroupPhase" class="group-discussion-panel">
+          <div class="group-panel-title">今日の全体対話の話題</div>
+          <p class="group-panel-desc">
+            他のグループの考えを見て、自分のプログラムと比べながら意見を出してみよう。
+          </p>
+          <div class="group-example-list">
+            <div
+              v-for="example in GROUP_DISCUSSION_EXAMPLES"
+              :key="example.group"
+              class="group-example-card"
+            >
+              <div class="group-example-header">
+                <span class="group-badge">{{ example.group }}</span>
+                <strong>{{ example.title }}</strong>
+              </div>
+              <div class="group-rule-list">
+                <div
+                  v-for="ruleText in example.rules"
+                  :key="ruleText"
+                  class="group-rule-line"
+                >
+                  {{ ruleText }}
+                </div>
+              </div>
+              <div class="group-question">{{ example.question }}</div>
+            </div>
+          </div>
+        </div>
 
         <div class="chat-window" ref="chatWindowRef">
           <div
@@ -1004,12 +1077,14 @@ watch(
             class="chat-bubble"
             :class="msg.role === 'ai' ? 'bubble-ai' : 'bubble-user'"
           >
-            <div class="bubble-avatar">{{ msg.role === 'ai' ? 'AI' : 'あなた' }}</div>
+            <div class="bubble-avatar">
+              {{ msg.role === 'ai' ? (isGroupPhase ? '司会AI' : 'AI') : (isGroupPhase ? '自分の意見' : 'あなた') }}
+            </div>
             <div class="bubble-text">{{ msg.text }}</div>
           </div>
 
           <div v-if="isLoading" class="chat-bubble bubble-ai loading-bubble">
-            <div class="bubble-avatar">AI</div>
+            <div class="bubble-avatar">{{ isGroupPhase ? '司会AI' : 'AI' }}</div>
             <div class="bubble-text">考え中<span class="dots">...</span></div>
           </div>
 
@@ -1020,7 +1095,7 @@ watch(
           <textarea
             v-model="userInput"
             class="chat-input"
-            placeholder="AIに話しかける（Enterで送信、Shift+Enterで改行）"
+            :placeholder="chatInputPlaceholder"
             rows="2"
             :disabled="isLoading"
             @keydown="handleKeydown"
@@ -1031,7 +1106,7 @@ watch(
         </div>
 
         <button class="btn-advice" :disabled="isLoading" @click="requestAdvice">
-          {{ isLoading ? '考え中...' : '今のプログラムについてアドバイスをもらう' }}
+          {{ isLoading ? '考え中...' : adviceButtonLabel }}
         </button>
       </section>
     </main>
@@ -1756,6 +1831,75 @@ body {
 
 /* ── Chat ── */
 .panel-chat { display: flex; flex-direction: column; }
+.group-discussion-panel {
+  margin-bottom: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+}
+.group-panel-title {
+  font-size: 0.86rem;
+  font-weight: 800;
+  color: #3730a3;
+  margin-bottom: 4px;
+}
+.group-panel-desc {
+  font-size: 0.78rem;
+  color: #475569;
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+.group-example-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.group-example-card {
+  background: white;
+  border: 1px solid #ddd6fe;
+  border-radius: 9px;
+  padding: 9px;
+}
+.group-example-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 6px;
+  font-size: 0.8rem;
+}
+.group-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #4f46e5;
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.group-rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 7px;
+}
+.group-rule-line {
+  padding: 5px 7px;
+  border-radius: 7px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+.group-question {
+  padding: 6px 8px;
+  border-left: 3px solid #6366f1;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 0.76rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
 .chat-window {
   flex: 1;
   display: flex;
