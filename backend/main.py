@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Iterator
 import os
 import json
 import re
@@ -50,8 +51,9 @@ class SimulationResult(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    role: str   # "user" | "ai"
+    role: str   # "user" | "ai" | "group"
     text: str
+    speaker: Optional[str] = None
 
 
 class AdviceRequest(BaseModel):
@@ -393,27 +395,28 @@ def generate_with_gemini(req: AdviceRequest, user_text: str) -> str:
     return response.text
 
 
-def generate_with_ollama(req: AdviceRequest, user_text: str) -> str:
+def request_ollama_chat(
+    messages: List[Dict[str, str]],
+    *,
+    temperature: float = 0.7,
+    num_predict: Optional[int] = None,
+) -> str:
+    """Ollama の chat API を1回呼び出す共通処理。"""
     model_name = os.environ.get("OLLAMA_MODEL")
     if not model_name:
         raise ValueError("OLLAMA_MODEL が未設定です")
 
     base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
     timeout_seconds = int(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "60"))
-    system_instruction = build_system_instruction(req.phase or 2, req)
-    message_to_send = build_message_payload(user_text, req)
-
-    messages = [{"role": "system", "content": system_instruction}]
-    for msg in (req.history or [])[-10:]:
-        role = "assistant" if msg.role == "ai" else "user"
-        messages.append({"role": role, "content": msg.text})
-    messages.append({"role": "user", "content": message_to_send})
+    options: Dict[str, Any] = {"temperature": temperature}
+    if num_predict is not None:
+        options["num_predict"] = num_predict
 
     payload = {
         "model": model_name,
         "messages": messages,
         "stream": False,
-        "options": {"temperature": 0.7},
+        "options": options,
     }
 
     req_obj = urllib_request.Request(
@@ -434,6 +437,18 @@ def generate_with_ollama(req: AdviceRequest, user_text: str) -> str:
     if not content:
         raise RuntimeError("Ollama 応答が空でした")
     return content
+
+
+def generate_with_ollama(req: AdviceRequest, user_text: str) -> str:
+    system_instruction = build_system_instruction(req.phase or 2, req)
+    message_to_send = build_message_payload(user_text, req)
+
+    messages = [{"role": "system", "content": system_instruction}]
+    for msg in (req.history or [])[-10:]:
+        role = "assistant" if msg.role == "ai" else "user"
+        messages.append({"role": role, "content": msg.text})
+    messages.append({"role": "user", "content": message_to_send})
+    return request_ollama_chat(messages)
 
 
 def parse_program_draft_from_message(message: str) -> Dict[str, Any]:
@@ -617,6 +632,211 @@ def fallback_response(req: AdviceRequest) -> str:
     )
 
 
+GROUP_AGENTS = [
+    {
+        "id": "group_a",
+        "speaker": "Aグループ",
+        "initial_program": "[明るさセンサーON（夜）] → [チャイムを鳴らす]",
+        "focus": "夜に人がいない場面で、自分たちの案がどう動くかを特に考える",
+        "required_observation": "人がいない夜でも、明るさセンサーONだけでチャイムが鳴る",
+    },
+    {
+        "id": "group_b",
+        "speaker": "Bグループ",
+        "initial_program": "[人感センサーON AND 明るさセンサーON（夜）] → [ドアを開ける]",
+        "focus": "昼に人が来た場面で、自分たちの案がどう動くかを特に考える",
+        "required_observation": "昼に人が来ても、明るさセンサーがOFFなのでドアは開かない",
+    },
+    {
+        "id": "group_c",
+        "speaker": "Cグループ",
+        "initial_program": (
+            "[人感センサーON] → [ドアを開ける] / "
+            "[人感センサーON] → [チャイムを鳴らす]"
+        ),
+        "focus": "昼に人が来た場面で、チャイムも鳴らしてよいかを特に考える",
+        "required_observation": "昼に人が来ると、ドアだけでなくチャイムも鳴る",
+    },
+]
+
+
+GROUP_FALLBACK_REACTIONS = {
+    "group_a": "学習者の指摘と同じ点に気づきました。ほかの場面でも似た問題が起きないでしょうか？",
+    "group_b": "Aグループとは違う場面ですが、条件を一つずつ確かめる必要がある点は同じだと思います。",
+    "group_c": "Bグループと同じ昼の場面でも、注目した動作が違いました。自分たちの案では両方を確認できていますか？",
+}
+
+
+def format_discussion_history(history: Optional[List[ChatMessage]]) -> str:
+    if not history:
+        return "（まだ発言はありません）"
+
+    lines = []
+    for msg in history[-12:]:
+        speaker = msg.speaker
+        if not speaker:
+            speaker = "学習者" if msg.role == "user" else "司会AI"
+        lines.append(f"{speaker}: {msg.text}")
+    return "\n".join(lines)
+
+
+def build_group_agent_system_prompt(agent: Dict[str, str]) -> str:
+    return f"""\
+あなたはプログラミング課題について話し合う「{agent['speaker']}」の代表です。
+司会者ではなく、他グループとは独立した一つのグループとして発言してください。
+
+【課題】
+・人が来たら、昼夜を問わずドアを開ける
+・夜に人が来たらチャイムを鳴らし、昼や人がいないときは鳴らさない
+
+【使えるものと意味】
+・人感センサーON = 人がいる
+・明るさセンサーON = 夜（暗い）
+・ドアを開ける
+・チャイムを鳴らす
+この4種類以外は使えません。時計、時刻、日没、日の出、新しいセンサー、センサーの精度の話を持ち込まないでください。
+明るさセンサーONが夜を正しく表すことは前提であり、その精度を疑う課題ではありません。
+
+【あなたたちが最初に考えた案】
+{agent['initial_program']}
+
+【このグループが注目する観点】
+{agent['focus']}
+
+【シミュレーションで確認済みの事実（変更・否定禁止）】
+{agent['required_observation']}
+この事実はプログラムを実行して確認済みです。反対の結果を述べたり、別の条件へ読み替えたりしてはいけません。
+
+【発言ルール】
+・確認済みの事実はシステムが別に表示するため、あなたは繰り返さない
+・前に発言した学習者や別グループとの共通点または相違点だけを1〜2文で述べる
+・プログラムの動作や修正案を新たに説明しない
+・課題の条件を再計算しない
+・自分のグループは「私たち」と呼ぶ
+・正解のルール構成をそのまま提示しない
+・質問は多くても1つにする
+・見出しや「{agent['speaker']}:」という話者名は出力しない
+"""
+
+
+def is_valid_group_reaction(message: str) -> bool:
+    """LLMには社会的な反応だけを任せ、課題ロジックの再解釈を許さない。"""
+    forbidden_terms = (
+        "時計", "時刻", "日没", "日の出", "日出", "侵入", "防犯",
+        "安全面", "センサーの精度", "誤検知",
+        "人感", "明るさ", "センサー", "ドア", "チャイム", "昼", "夜",
+        "開く", "開ける", "閉", "鳴る", "鳴らす", "鳴らない",
+    )
+    stripped = message.strip()
+    return (
+        10 <= len(stripped) <= 180
+        and not any(term in stripped for term in forbidden_terms)
+        and stripped[-1] in "。？！?！"
+    )
+
+
+def compose_group_message(agent: Dict[str, str], reaction: str) -> str:
+    return (
+        f"私たちの案をシミュレーションして、{agent['required_observation']}ことを確認しました。\n"
+        f"{reaction.strip()}"
+    )
+
+
+def is_valid_facilitator_message(message: str) -> bool:
+    forbidden_terms = (
+        "時計", "時刻", "日没", "日の出", "日出", "侵入", "防犯",
+        "安全面", "センサーの精度", "誤検知",
+    )
+    stripped = message.strip()
+    return (
+        bool(stripped)
+        and not any(term in stripped for term in forbidden_terms)
+        and stripped[-1] in "。？！?！"
+        and "Aグループ" in stripped
+        and "Bグループ" in stripped
+        and "Cグループ" in stripped
+    )
+
+
+def build_group_agent_user_prompt(
+    req: AdviceRequest,
+    user_text: str,
+    round_turns: List[Dict[str, str]],
+) -> str:
+    current_round = "\n".join(
+        f"{turn['speaker']}: {turn['text']}" for turn in round_turns
+    ) or "（このラウンドではまだ他グループは発言していません）"
+    return f"""\
+【これまでの全体対話】
+{format_discussion_history(req.history)}
+
+【学習者の現在のプログラム】
+{describe_rules(req.rules)}
+
+【学習者のプログラムを動かした結果】
+{describe_scenarios(req.rules)}
+
+【学習者の今回の発言】
+{user_text}
+
+【このラウンドで先に出たグループの発言】
+{current_round}
+
+確認済みの動作はシステム側で表示します。上の発言を受けた、あなたのグループとしての反応だけを述べてください。
+"""
+
+
+def build_facilitator_user_prompt(
+    req: AdviceRequest,
+    user_text: str,
+    round_turns: List[Dict[str, str]],
+) -> str:
+    current_round = "\n".join(
+        f"{turn['speaker']}: {turn['text']}" for turn in round_turns
+    )
+    return f"""\
+【学習者の今回の発言】
+{user_text}
+
+【今回、独立して考えた各グループの発言】
+{current_round}
+
+【学習者の現在のプログラム】
+{describe_rules(req.rules)}
+
+3グループの共通点と相違点を短く整理し、学習者が自分のプログラムと比較するための問いを1つだけ出してください。
+正解のルール構成は直接教えず、3〜5文で完結させてください。
+使えるのは人感センサー、明るさセンサー、ドア、チャイムだけです。時計、時刻、日没、日の出、センサー精度など、発言にない新しい論点は追加しないでください。
+"""
+
+
+def fallback_group_discussion(req: AdviceRequest) -> List[Dict[str, str]]:
+    turns = [
+        {
+            "role": "group",
+            "speaker": agent["speaker"],
+            "agent_id": agent["id"],
+            "text": compose_group_message(
+                agent, GROUP_FALLBACK_REACTIONS[agent["id"]]
+            ),
+        }
+        for agent in GROUP_AGENTS
+    ]
+    turns.append(
+        {
+            "role": "ai",
+            "speaker": "司会AI",
+            "agent_id": "facilitator",
+            "text": (
+                "Aグループは人がいない夜のチャイム、Bグループは昼に人が来たときのドア、"
+                "Cグループは昼のチャイムに注目しました。"
+                "自分のプログラムを4つの場面で動かすと、どのグループと似た問題が起きそうですか？"
+            ),
+        }
+    )
+    return turns
+
+
 # --- Endpoint ---
 
 @app.post("/api/advice")
@@ -642,6 +862,107 @@ async def get_advice(req: AdviceRequest):
             return {"message": f"Ollama API エラー: {e}", "program_draft": []}
 
     return {"message": fallback_response(req), "program_draft": []}
+
+
+def generate_group_discussion_turns(
+    req: AdviceRequest,
+) -> Iterator[Dict[str, str]]:
+    """A・B・C・司会を順次生成し、完了した話者から返す。"""
+    user_text = req.current_message or (
+        "各グループのプログラムを比べて、気づいたことを話し合いたいです。"
+    )
+
+    if get_llm_provider() != "ollama":
+        yield from fallback_group_discussion(req)
+        return
+
+    num_predict = int(os.environ.get("OLLAMA_GROUP_NUM_PREDICT", "140"))
+    facilitator_num_predict = int(
+        os.environ.get("OLLAMA_FACILITATOR_NUM_PREDICT", "160")
+    )
+    turns: List[Dict[str, str]] = []
+
+    for agent in GROUP_AGENTS:
+        messages = [
+            {"role": "system", "content": build_group_agent_system_prompt(agent)},
+            {
+                "role": "user",
+                "content": build_group_agent_user_prompt(req, user_text, turns),
+            },
+        ]
+        try:
+            reaction = request_ollama_chat(
+                messages,
+                temperature=0.45,
+                num_predict=num_predict,
+            ).strip()
+            if not is_valid_group_reaction(reaction):
+                reaction = GROUP_FALLBACK_REACTIONS[agent["id"]]
+        except Exception:
+            reaction = GROUP_FALLBACK_REACTIONS[agent["id"]]
+
+        generated = compose_group_message(agent, reaction)
+
+        turn = {
+            "role": "group",
+            "speaker": agent["speaker"],
+            "agent_id": agent["id"],
+            "text": generated,
+        }
+        turns.append(turn)
+        yield turn
+
+    facilitator_system = get_system_prompt(4) + """
+
+【今回の進行方法】
+A・B・Cグループは、それぞれ別のAI呼び出しで独立して考え、すでに発言しました。
+あなたは司会に専念し、存在しない追加発言を作らず、提示された発言だけを整理してください。
+"""
+    facilitator_messages = [
+        {"role": "system", "content": facilitator_system},
+        {
+            "role": "user",
+            "content": build_facilitator_user_prompt(req, user_text, turns),
+        },
+    ]
+    try:
+        facilitator_text = request_ollama_chat(
+            facilitator_messages,
+            temperature=0.3,
+            num_predict=facilitator_num_predict,
+        ).strip()
+        if not is_valid_facilitator_message(facilitator_text):
+            raise ValueError("司会AIの応答が教材の制約を満たしませんでした")
+    except Exception:
+        facilitator_text = (
+            "Aグループは人がいない夜のチャイム、Bグループは昼に人が来たときのドア、"
+            "Cグループは昼のチャイムに注目しました。"
+            "それぞれ違う場面ですが、条件と実際の動きを比べている点は共通しています。"
+            "自分のプログラムを4つの場面で動かすと、どのグループと似た問題が起きそうですか？"
+        )
+
+    yield {
+        "role": "ai",
+        "speaker": "司会AI",
+        "agent_id": "facilitator",
+        "text": facilitator_text,
+    }
+
+
+@app.post("/api/group-discussion")
+def run_group_discussion(req: AdviceRequest):
+    """フェーズ4の4者分をまとめて返す非ストリーミング版。"""
+    return {"turns": list(generate_group_discussion_turns(req))}
+
+
+@app.post("/api/group-discussion/stream")
+def stream_group_discussion(req: AdviceRequest):
+    """フェーズ4の発言を、話者ごとのJSON Linesとして順次返す。"""
+    async def generate():
+        for turn in generate_group_discussion_turns(req):
+            yield json.dumps(turn, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
 # --- Prompt config endpoint ---
@@ -708,7 +1029,7 @@ async def save_log(entry: LogEntry):
             for r in entry.rules
         ],
         "chat_history": [
-            {"role": m.role, "text": m.text}
+            {"role": m.role, "text": m.text, "speaker": m.speaker}
             for m in entry.chat_history
         ],
         "all_correct": entry.all_correct,

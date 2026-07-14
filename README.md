@@ -82,9 +82,16 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen2.5:7b-instruct
 AI_INCLUDE_PROGRAM_DRAFT=true
 AI_PROGRAM_DRAFT_MAX_RULES=1
+OLLAMA_GROUP_NUM_PREDICT=140
+OLLAMA_FACILITATOR_NUM_PREDICT=160
 ```
 
 `AI_INCLUDE_PROGRAM_DRAFT=true` のとき、AI応答の末尾に「AIの仮説プログラム」（ルール案）が表示されます。
+
+フェーズ4では、A・B・Cグループと司会をそれぞれ独立したOllama呼び出しとして実行します。
+A→B→Cの順に前の発言を参照し、最後に司会AIが相違点を整理して問いかけます。
+そのため、フェーズ4の1ラウンドにつき最大4回のローカルLLM生成が行われます。
+画面では `/api/group-discussion/stream` を利用し、完了したグループの発言から順次表示します。
 
 ### 2. フロントエンド
 
@@ -162,6 +169,23 @@ graduation-research/
   "message": "夜にお客さんが来ていないとき、ベルはどうなりますか？..."
 }
 ```
+
+### `POST /api/group-discussion`
+
+フェーズ4専用。リクエスト形式は `/api/advice` と同じです。A・B・C・司会の順に、話者別の発言を返します。
+
+```json
+{
+  "turns": [
+    { "role": "group", "speaker": "Aグループ", "agent_id": "group_a", "text": "..." },
+    { "role": "group", "speaker": "Bグループ", "agent_id": "group_b", "text": "..." },
+    { "role": "group", "speaker": "Cグループ", "agent_id": "group_c", "text": "..." },
+    { "role": "ai", "speaker": "司会AI", "agent_id": "facilitator", "text": "..." }
+  ]
+}
+```
+
+`POST /api/group-discussion/stream` は同じ処理を行い、上記の各要素を1行1JSONのJSON Lines形式で順次返します。
 
 ---
 

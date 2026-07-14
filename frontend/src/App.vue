@@ -18,7 +18,7 @@ async function saveLog(event, phase) {
         rules: rulesForApi.value,
         chat_history: chatMessages.value
           .filter((m) => m.id !== 0)
-          .map((m) => ({ role: m.role, text: m.text })),
+          .map((m) => ({ role: m.role, text: m.text, speaker: m.speaker })),
         all_correct: allCorrect.value,
       }),
     })
@@ -239,7 +239,7 @@ const isGroupPhase = computed(() => currentPhase.value === 4)
 const PHASE_INTRO_MESSAGES = {
   2: 'こんにちは！ペアの対話フェーズだね。\nあなたのプログラム、どんなルールにした？私のと比べてみたいな。教えてくれる？',
   3: '実行して確認するフェーズだよ！\n4つの場面（昼・人あり、昼・人なし、夜・人あり、夜・人なし）を全部チェックしてみよう。全部✓になるかな？',
-  4: 'ここからは全体対話だよ。\n他のグループの考えを見ながら、「このプログラムだとどんな場面で困りそうか」「自分たちの考えとどこが違うか」をクラス全体で話し合ってみよう。',
+  4: 'ここからは全体対話だよ。\nA・B・Cの各AIグループが、それぞれの立場から順番に意見を出します。前のグループの発言も読みながら話し合うので、自分の考えも伝えて比べてみよう。',
 }
 
 const GROUP_DISCUSSION_EXAMPLES = [
@@ -272,7 +272,7 @@ const chatPanelTitle = computed(() =>
 
 const chatPanelDesc = computed(() =>
   isGroupPhase.value
-    ? '他グループの考えをもとに、クラス全体で気づいたことや疑問を出し合おう。'
+    ? '独立したA・B・Cグループの発言を聞き、司会AIと一緒に考えを比べよう。'
     : '考えたことや疑問をAIに話しかけてみよう。\nヒントをもらいながら一緒に考えられます。'
 )
 
@@ -284,7 +284,7 @@ const chatInputPlaceholder = computed(() =>
 
 const adviceButtonLabel = computed(() =>
   isGroupPhase.value
-    ? '他グループの考えについて話題を出してもらう'
+    ? 'A・B・Cグループの討論を進める'
     : '今のプログラムについてアドバイスをもらう'
 )
 
@@ -298,6 +298,8 @@ async function advancePhase() {
     chatMessages.value.push({
       id: Date.now(),
       role: 'ai',
+      speaker: next === 4 ? '司会AI' : 'AI',
+      phase: next,
       text: PHASE_INTRO_MESSAGES[next],
     })
     nextTick(() => chatEndRef.value?.scrollIntoView({ behavior: 'smooth' }))
@@ -489,6 +491,8 @@ const chatMessages = ref([
   {
     id: 0,
     role: 'ai',
+    speaker: 'AI',
+    phase: 1,
     text: 'こんにちは！コンビニの入り口プログラムを一緒に考えましょう。\nまずは「どんなときにドアが開いてほしいか」から考えてみてください。できたら「AIに話しかける」ボタンを押してね。',
   },
 ])
@@ -501,13 +505,15 @@ async function scrollToBottom() {
   chatEndRef.value?.scrollIntoView({ behavior: 'smooth' })
 }
 
-// API 呼び出しの共通処理
-async function callAdviceApi(currentMessage) {
+function historyForApi({ phase4Only = false } = {}) {
+  return chatMessages.value
+    .filter((m) => m.id !== 0 && (!phase4Only || m.phase === 4))
+    .map((m) => ({ role: m.role, text: m.text, speaker: m.speaker }))
+}
+
+// フェーズ2・3の通常AI API
+async function callAdviceApi(currentMessage, history = historyForApi()) {
   const r = simResult.value
-  // history = 今回の発言を含まない過去の会話ターン
-  const history = chatMessages.value
-    .filter((m) => m.id !== 0)
-    .map((m) => ({ role: m.role, text: m.text }))
 
   const res = await fetch('http://localhost:8001/api/advice', {
     method: 'POST',
@@ -521,23 +527,96 @@ async function callAdviceApi(currentMessage) {
       phase: currentPhase.value,
     }),
   })
+  if (!res.ok) throw new Error(`advice API: ${res.status}`)
   return res.json()
+}
+
+// フェーズ4: A・B・C・司会を別々のOllama呼び出しで動かす
+async function callGroupDiscussionApi(currentMessage, history = historyForApi({ phase4Only: true })) {
+  const r = simResult.value
+  const res = await fetch('http://localhost:8001/api/group-discussion/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      rules: rulesForApi.value,
+      environment: env.value,
+      result: { ...r, allCorrect: allCorrect.value },
+      history,
+      current_message: currentMessage,
+      phase: 4,
+    }),
+  })
+  if (!res.ok) throw new Error(`group discussion API: ${res.status}`)
+
+  if (!res.body) throw new Error('group discussion stream is unavailable')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const appendLine = async (line) => {
+    if (!line.trim()) return
+    const turn = JSON.parse(line)
+    chatMessages.value.push({
+      id: `${Date.now()}-${turn.agent_id}-${chatMessages.value.length}`,
+      role: turn.role,
+      speaker: turn.speaker,
+      agentId: turn.agent_id,
+      phase: 4,
+      text: turn.text,
+    })
+    await scrollToBottom()
+  }
+
+  while (true) {
+    const { value, done } = await reader.read()
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+    for (const line of lines) await appendLine(line)
+    if (done) break
+  }
+  await appendLine(buffer)
+}
+
+function messageSpeaker(msg) {
+  if (msg.speaker) return msg.speaker
+  if (msg.role === 'ai') return isGroupPhase.value ? '司会AI' : 'AI'
+  return isGroupPhase.value ? '自分の意見' : 'あなた'
 }
 
 async function sendMessage() {
   const text = userInput.value.trim()
   if (!text || isLoading.value) return
 
+  // APIに渡す履歴は、今回の発言を追加する前に確定する
+  const history = historyForApi({ phase4Only: isGroupPhase.value })
+
   // 先に表示に追加してから API 呼び出し
-  chatMessages.value.push({ id: Date.now(), role: 'user', text })
+  chatMessages.value.push({
+    id: Date.now(),
+    role: 'user',
+    speaker: isGroupPhase.value ? '自分の意見' : 'あなた',
+    phase: currentPhase.value,
+    text,
+  })
   userInput.value = ''
   await scrollToBottom()
 
   isLoading.value = true
   try {
-    const data = await callAdviceApi(text)
-    updateAiProgramDraft(data)
-    chatMessages.value.push({ id: Date.now() + 1, role: 'ai', text: data.message })
+    if (isGroupPhase.value) {
+      await callGroupDiscussionApi(text, history)
+    } else {
+      const data = await callAdviceApi(text, history)
+      updateAiProgramDraft(data)
+      chatMessages.value.push({
+        id: Date.now() + 1,
+        role: 'ai',
+        speaker: 'AI',
+        phase: currentPhase.value,
+        text: data.message,
+      })
+    }
   } catch {
     chatMessages.value.push({
       id: Date.now() + 1,
@@ -561,10 +640,20 @@ async function requestAdvice() {
   if (isLoading.value) return
   isLoading.value = true
   try {
-    // current_message なし → バックエンドがアドバイスリクエストとして処理
-    const data = await callAdviceApi(null)
-    updateAiProgramDraft(data)
-    chatMessages.value.push({ id: Date.now(), role: 'ai', text: data.message })
+    if (isGroupPhase.value) {
+      await callGroupDiscussionApi(null)
+    } else {
+      // current_message なし → バックエンドがアドバイスリクエストとして処理
+      const data = await callAdviceApi(null)
+      updateAiProgramDraft(data)
+      chatMessages.value.push({
+        id: Date.now(),
+        role: 'ai',
+        speaker: 'AI',
+        phase: currentPhase.value,
+        text: data.message,
+      })
+    }
   } catch {
     chatMessages.value.push({
       id: Date.now(),
@@ -588,6 +677,8 @@ watch(
   rulesForApi,
   () => {
     if (!currentPhaseData.value.showChat) return
+    // フェーズ4は1回で4生成するため、明示的な討論操作だけで呼び出す
+    if (isGroupPhase.value) return
 
     ruleAwareMsg.value = 'ルールを認識中...'
     clearTimeout(autoAdviceTimer)
@@ -1042,9 +1133,9 @@ watch(
         <p class="panel-desc">{{ chatPanelDesc }}</p>
 
         <div v-if="isGroupPhase" class="group-discussion-panel">
-          <div class="group-panel-title">今日の全体対話の話題</div>
+          <div class="group-panel-title">討論に参加する3つのAIグループ</div>
           <p class="group-panel-desc">
-            他のグループの考えを見て、自分のプログラムと比べながら意見を出してみよう。
+            各グループは下の案から考え始め、ほかの発言を聞いて考え直すこともあります。
           </p>
           <div class="group-example-list">
             <div
@@ -1075,17 +1166,20 @@ watch(
             v-for="msg in chatMessages"
             :key="msg.id"
             class="chat-bubble"
-            :class="msg.role === 'ai' ? 'bubble-ai' : 'bubble-user'"
+            :class="[
+              msg.role === 'ai' ? 'bubble-ai' : (msg.role === 'group' ? 'bubble-group' : 'bubble-user'),
+              msg.agentId ? `bubble-${msg.agentId}` : '',
+            ]"
           >
-            <div class="bubble-avatar">
-              {{ msg.role === 'ai' ? (isGroupPhase ? '司会AI' : 'AI') : (isGroupPhase ? '自分の意見' : 'あなた') }}
-            </div>
+            <div class="bubble-avatar">{{ messageSpeaker(msg) }}</div>
             <div class="bubble-text">{{ msg.text }}</div>
           </div>
 
           <div v-if="isLoading" class="chat-bubble bubble-ai loading-bubble">
             <div class="bubble-avatar">{{ isGroupPhase ? '司会AI' : 'AI' }}</div>
-            <div class="bubble-text">考え中<span class="dots">...</span></div>
+            <div class="bubble-text">
+              {{ isGroupPhase ? 'A・B・Cグループで話し合い中' : '考え中' }}<span class="dots">...</span>
+            </div>
           </div>
 
           <div ref="chatEndRef" />
@@ -1921,8 +2015,16 @@ body {
   max-width: 96%;
 }
 .bubble-ai { align-self: flex-start; }
+.bubble-group { align-self: flex-start; }
 .bubble-user { align-self: flex-end; flex-direction: row-reverse; }
-.bubble-avatar { font-size: 1.1rem; flex-shrink: 0; margin-top: 2px; }
+.bubble-avatar {
+  min-width: 58px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-align: center;
+  flex-shrink: 0;
+  margin-top: 8px;
+}
 .bubble-text {
   padding: 9px 13px;
   border-radius: 13px;
@@ -1936,6 +2038,14 @@ body {
   border: 1px solid var(--clr-border);
   border-top-left-radius: 4px;
 }
+.bubble-group .bubble-text {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-top-left-radius: 4px;
+}
+.bubble-group_a .bubble-text { border-left: 4px solid #f59e0b; }
+.bubble-group_b .bubble-text { border-left: 4px solid #8b5cf6; }
+.bubble-group_c .bubble-text { border-left: 4px solid #06b6d4; }
 .bubble-user .bubble-text {
   background: var(--clr-primary);
   color: white;
