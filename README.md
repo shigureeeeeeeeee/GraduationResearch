@@ -112,7 +112,13 @@ npm run dev
 graduation-research/
 ├── README.md
 ├── backend/
-│   ├── main.py               # FastAPI アプリ（エンドポイント・プロンプト生成）
+│   ├── main.py               # FastAPI アプリとエンドポイント
+│   ├── schemas.py            # APIのデータモデル
+│   ├── domain.py             # ルール評価とフォールバック応答
+│   ├── prompts.py            # フェーズ別プロンプト生成
+│   ├── llm_service.py        # Gemini / Ollama連携
+│   ├── discussion.py         # フェーズ4のグループ討論
+│   ├── storage.py            # プロンプト設定とログの保存
 │   ├── requirements.txt
 │   └── .env.example
 └── frontend/
@@ -121,7 +127,11 @@ graduation-research/
     ├── index.html
     └── src/
         ├── main.js
-        └── App.vue           # メイン UI（3 エリアを 1 ファイルに集約）
+        ├── App.vue           # 画面全体の状態とコンポーネントの組み立て
+        ├── config.js         # フェーズ・条件・シナリオ定義
+        ├── components/       # 各画面パネル
+        ├── domain/           # シミュレーションロジック
+        └── services/         # バックエンドAPI通信
 ```
 
 ---
