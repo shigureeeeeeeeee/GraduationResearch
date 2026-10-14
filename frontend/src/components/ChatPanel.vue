@@ -12,6 +12,9 @@ const props = defineProps({
   messages: { type: Array, required: true },
   loading: { type: Boolean, required: true },
   modelValue: { type: String, required: true },
+  groupExamples: { type: Array, default: () => GROUP_DISCUSSION_EXAMPLES },
+  groupDescription: { type: String, default: '各グループは下の案から考え始め、ほかの発言を聞いて考え直すこともあります。' },
+  disabled: Boolean,
 })
 
 const emit = defineEmits(['update:modelValue', 'send', 'request-advice'])
@@ -53,9 +56,9 @@ defineExpose({ scrollToBottom })
 
     <div v-if="groupPhase" class="group-discussion-panel">
       <div class="group-panel-title">討論に参加する3つのAIグループ</div>
-      <p class="group-panel-desc">各グループは下の案から考え始め、ほかの発言を聞いて考え直すこともあります。</p>
+      <p class="group-panel-desc">{{ groupDescription }}</p>
       <div class="group-example-list">
-        <div v-for="example in GROUP_DISCUSSION_EXAMPLES" :key="example.group" class="group-example-card">
+        <div v-for="example in groupExamples" :key="example.group" class="group-example-card">
           <div class="group-example-header"><span class="group-badge">{{ example.group }}</span><strong>{{ example.title }}</strong></div>
           <div class="group-rule-list">
             <div v-for="ruleText in example.rules" :key="ruleText" class="group-rule-line">{{ ruleText }}</div>
@@ -76,7 +79,7 @@ defineExpose({ scrollToBottom })
         ]"
       >
         <div class="bubble-avatar">{{ speakerName(message) }}</div>
-        <div class="bubble-text">{{ message.text }}</div>
+        <div class="bubble-text">{{ message.text }}<small v-if="message.llm?.fallback" class="fallback-label">ルールベースの補助応答</small></div>
       </div>
       <div v-if="loading" class="chat-bubble bubble-ai loading-bubble">
         <div class="bubble-avatar">{{ groupPhase ? '司会AI' : 'AI' }}</div>
@@ -91,13 +94,14 @@ defineExpose({ scrollToBottom })
         class="chat-input"
         :placeholder="inputPlaceholder"
         rows="2"
-        :disabled="loading"
+        maxlength="5000"
+        :disabled="loading || disabled"
         @input="$emit('update:modelValue', $event.target.value)"
         @keydown="handleKeydown"
       />
-      <button class="btn-send" :disabled="loading || !modelValue.trim()" @click="$emit('send')">送信</button>
+      <button class="btn-send" :disabled="loading || disabled || !modelValue.trim()" @click="$emit('send')">送信</button>
     </div>
-    <button class="btn-advice" :disabled="loading" @click="$emit('request-advice')">
+    <button class="btn-advice" :disabled="loading || disabled" @click="$emit('request-advice')">
       {{ loading ? '考え中...' : adviceLabel }}
     </button>
   </section>

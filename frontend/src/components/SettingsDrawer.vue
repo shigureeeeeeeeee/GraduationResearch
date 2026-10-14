@@ -1,11 +1,10 @@
 <script setup>
 import { computed, reactive, ref } from 'vue'
-import {
-  fetchLogs,
-  fetchPrompts,
-  resetPrompts,
-  savePrompts,
-} from '../services/api'
+import * as legacyApi from '../services/api'
+import * as ventilationApi from '../services/ventilationApi'
+
+const props = defineProps({ task: { type: String, default: 'legacy' } })
+const api = computed(() => props.task === 'ventilation' ? ventilationApi : legacyApi)
 
 const PROMPT_FIELDS = [
   { key: 'base', label: '共通ベースプロンプト' },
@@ -44,7 +43,7 @@ const sessionRows = computed(() => {
         ...entry,
         shortId: entry.session_id.slice(-8),
         finished: entry.event === 'session_end',
-        ruleCount: (entry.rules || []).length,
+        ruleCount: entry.program ? Object.values(entry.program).flat().length : (entry.rules || []).length,
         chatCount: history.length,
         userChatCount: history.filter((message) => message.role === 'user').length,
         timestampLabel: new Date(entry.timestamp).toLocaleString('ja-JP'),
@@ -58,7 +57,9 @@ const dashboardSummary = computed(() => {
   return {
     total,
     completed: rows.filter((row) => row.finished).length,
-    allCorrect: rows.filter((row) => row.all_correct).length,
+    allCorrect: rows.filter((row) => props.task === 'ventilation'
+      ? row.task_id === 'ventilation-goals-v3' && row.goals_met
+      : row.all_correct).length,
     avgChat: total
       ? (rows.reduce((sum, row) => sum + row.chatCount, 0) / total).toFixed(1)
       : '0.0',
@@ -70,7 +71,7 @@ async function open() {
   settingsMessage.value = ''
   dashboardMessage.value = ''
   try {
-    Object.assign(prompts, await fetchPrompts())
+    Object.assign(prompts, await api.value.fetchPrompts())
     await loadDashboard()
   } catch {
     settingsMessage.value = 'プロンプト設定の読み込みに失敗しました'
@@ -81,7 +82,7 @@ async function loadDashboard() {
   isDashboardLoading.value = true
   dashboardMessage.value = ''
   try {
-    logEntries.value = await fetchLogs()
+    logEntries.value = await api.value.fetchLogs()
   } catch {
     dashboardMessage.value = 'ログの読み込みに失敗しました'
   } finally {
@@ -93,7 +94,7 @@ async function persistPrompts() {
   isSaving.value = true
   settingsMessage.value = ''
   try {
-    const result = await savePrompts({ ...prompts })
+    const result = await api.value.savePrompts({ ...prompts })
     if (result.status === 'ok') settingsMessage.value = '保存しました'
   } catch {
     settingsMessage.value = '保存に失敗しました'
@@ -106,8 +107,8 @@ async function restorePrompts() {
   if (!confirm('プロンプトをデフォルトに戻しますか？')) return
   isSaving.value = true
   try {
-    await resetPrompts()
-    Object.assign(prompts, await fetchPrompts())
+    await api.value.resetPrompts()
+    Object.assign(prompts, await api.value.fetchPrompts())
     settingsMessage.value = 'デフォルトに戻しました'
   } catch {
     settingsMessage.value = 'リセットに失敗しました'
@@ -141,11 +142,17 @@ function escapeCsv(value) {
 function downloadCsv() {
   const headers = [
     'session_id', 'final_phase', 'finished', 'all_correct', 'rule_count',
-    'chat_count', 'user_chat_count', 'last_saved_at',
+    'chat_count', 'user_chat_count', 'last_saved_at', 'task_id', 'constraints_met',
+    'unserved_room_steps', 'max_wait_a', 'max_wait_b',
+    'goals_met', 'unnecessary_ventilation_steps', 'urgent_unserved_room_steps',
   ]
   const rows = sessionRows.value.map((row) => [
     row.session_id, row.phase, row.finished, row.all_correct, row.ruleCount,
-    row.chatCount, row.userChatCount, row.timestamp,
+    row.chatCount, row.userChatCount, row.timestamp, row.task_id, row.constraints_met,
+    row.evaluation?.metrics?.unserved_room_steps, row.evaluation?.metrics?.max_wait?.A,
+    row.evaluation?.metrics?.max_wait?.B,
+    row.goals_met, row.evaluation?.metrics?.unnecessary_ventilation_steps,
+    row.evaluation?.metrics?.urgent_unserved_room_steps,
   ])
   const csv = [headers, ...rows]
     .map((row) => row.map(escapeCsv).join(','))
@@ -181,7 +188,7 @@ function downloadCsv() {
             ここで編集したプロンプトはバックエンドに保存され、次のAI応答から反映されます。
           </template>
           <template v-else>
-            保存された実験ログから、セッション数や正解状況、AIとの会話数を確認できます。
+            保存された実験ログから、セッション数や{{ task === 'ventilation' ? '達成基準の確認状況' : '正解状況' }}、AIとの会話数を確認できます。
           </template>
         </p>
 
@@ -204,7 +211,7 @@ function downloadCsv() {
           <div class="dashboard-summary-grid">
             <div class="dashboard-card"><span class="dashboard-card-label">セッション数</span><strong>{{ dashboardSummary.total }}</strong></div>
             <div class="dashboard-card"><span class="dashboard-card-label">完了セッション</span><strong>{{ dashboardSummary.completed }}</strong></div>
-            <div class="dashboard-card"><span class="dashboard-card-label">全シナリオ正解</span><strong>{{ dashboardSummary.allCorrect }}</strong></div>
+            <div class="dashboard-card"><span class="dashboard-card-label">{{ task === 'ventilation' ? '数値基準・最終実行範囲で達成' : '全シナリオ正解' }}</span><strong>{{ dashboardSummary.allCorrect }}</strong></div>
             <div class="dashboard-card"><span class="dashboard-card-label">平均会話数</span><strong>{{ dashboardSummary.avgChat }}</strong></div>
           </div>
           <div v-if="sessionRows.length === 0" class="dashboard-empty">
@@ -212,11 +219,13 @@ function downloadCsv() {
           </div>
           <div v-else class="dashboard-table-wrap">
             <table class="dashboard-table">
-              <thead><tr><th>セッション</th><th>最終フェーズ</th><th>状態</th><th>正解</th><th>ルール</th><th>会話</th><th>最終保存</th></tr></thead>
+              <thead><tr><th>セッション</th><th>最終フェーズ</th><th>状態</th><th>{{ task === 'ventilation' ? '確認状況' : '正解' }}</th><th>ルール</th><th>会話</th><th>最終保存</th></tr></thead>
               <tbody>
                 <tr v-for="row in sessionRows" :key="row.session_id">
                   <td>#{{ row.shortId }}</td><td>{{ row.phase }}</td><td>{{ row.finished ? '完了' : '途中' }}</td>
-                  <td><span :class="row.all_correct ? 'dash-ok' : 'dash-ng'">{{ row.all_correct ? '正解' : '未達' }}</span></td>
+                  <td v-if="row.task_id === 'ventilation-goals-v3'"><span :class="row.goals_met ? 'dash-ok' : 'dash-ng'">{{ row.goals_met ? '実行範囲で達成' : row.goals_met === null ? '未実行' : '未達' }}</span></td>
+                  <td v-else-if="row.task_id === 'ventilation-goals-v2'"><span :class="row.constraints_met ? 'dash-ok' : 'dash-ng'">{{ row.constraints_met ? '旧課題：制約違反なし' : '旧課題：未実行・違反あり' }}</span></td>
+                  <td v-else><span :class="row.all_correct ? 'dash-ok' : 'dash-ng'">{{ task === 'ventilation' ? '旧判定：' : '' }}{{ row.all_correct ? '正解' : '未達' }}</span></td>
                   <td>{{ row.ruleCount }}</td><td>{{ row.chatCount }}</td><td>{{ row.timestampLabel }}</td>
                 </tr>
               </tbody>

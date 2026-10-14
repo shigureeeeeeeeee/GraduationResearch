@@ -3,6 +3,8 @@ defineProps({
   phases: { type: Array, required: true },
   currentPhase: { type: Number, required: true },
   currentPhaseData: { type: Object, required: true },
+  disabled: Boolean,
+  completed: Boolean,
 })
 
 defineEmits(['advance', 'complete'])
@@ -32,8 +34,8 @@ defineEmits(['advance', 'complete'])
       </div>
       <div class="phase-desc">{{ currentPhaseData.desc }}</div>
       <div class="phase-nav">
-        <button v-if="currentPhase < 4" class="btn-next-phase" @click="$emit('advance')">次のフェーズへ進む →</button>
-        <button v-else class="btn-next-phase btn-complete" @click="$emit('complete')">セッションを完了して保存する</button>
+        <button v-if="currentPhase < 4" class="btn-next-phase" :disabled="disabled" @click="$emit('advance')">次のフェーズへ進む →</button>
+        <button v-else class="btn-next-phase btn-complete" :disabled="disabled || completed" @click="$emit('complete')">{{ completed ? 'セッション保存済み' : 'セッションを完了して保存する' }}</button>
       </div>
     </div>
   </div>

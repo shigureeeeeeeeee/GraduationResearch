@@ -9,6 +9,7 @@ from discussion import generate_discussion
 from llm_service import generate_advice
 from prompts import get_prompts
 from schemas import AdviceRequest, LogEntry, PromptsConfig
+from ventilation_api import router as ventilation_router
 from storage import (
     append_log,
     read_logs,
@@ -20,6 +21,7 @@ from storage import (
 load_dotenv()
 
 app = FastAPI(title="プログラミング学習支援システム API")
+app.include_router(ventilation_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

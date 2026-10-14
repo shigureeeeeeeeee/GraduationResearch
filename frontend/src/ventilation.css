@@ -1,0 +1,99 @@
+/* Reuse styles.css for the page, panels, buttons, and chat. Only ventilation controls need additional styles. */
+.ventilation-app .main-grid > * { min-width: 0; }
+.ventilation-app button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+.ventilation-app .btn-order:disabled { opacity: .3; }
+.task-instructions { flex-basis: 100%; font-size: .82rem; color: #78350f; }
+.task-instructions summary { cursor: pointer; }
+.task-instructions p, .task-instructions ol { margin-top: 10px; }
+.task-instructions ol { padding-left: 22px; }
+.task-instructions li { margin-bottom: 6px; }
+.lab-muted { color: var(--clr-muted); font-size: .82rem; }
+.ventilation-app .small { font-size: .75rem; }
+
+.program-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.program-tabs button { flex: 1; padding: 5px 6px; white-space: nowrap; font-size: .78rem; }
+.program-tabs button > span { margin-right: 4px; }
+.program-tabs small { margin-left: 5px; }
+.stage-description { font-size: .82rem; color: var(--clr-muted); margin-bottom: 14px; }
+.program-fieldset { border: 0; min-width: 0; }
+.program-rule, .program-fieldset .empty-hint { margin-bottom: 10px; }
+.condition-heading, .action-editor { display: flex; align-items: center; gap: 8px; font-size: .78rem; }
+.condition-heading > span, .action-editor > span { flex-shrink: 0; font-weight: 600; }
+.ventilation-app :is(.program-editor, .simulation-lab) :is(select, input:not([type='checkbox']), textarea) {
+  font: inherit; font-size: .78rem; border: 1px solid var(--clr-border); border-radius: 6px;
+  padding: 6px 8px; background: white; color: var(--clr-text); min-width: 0; max-width: 100%;
+}
+.ventilation-app :is(.program-editor, .simulation-lab) :is(select, input, textarea):focus-visible { outline: 2px solid var(--clr-primary); outline-offset: 2px; }
+.ventilation-app select { text-overflow: ellipsis; }
+.ventilation-app input[type='checkbox'] { accent-color: var(--clr-primary); }
+.condition-heading select { flex: 1; }
+.empty-condition { padding: 12px 0; color: var(--clr-muted); font-size: .77rem; }
+.condition-editor { padding: 8px; margin: 8px 0; border-radius: 6px; background: white; }
+.condition-top { display: flex; align-items: center; gap: 7px; }
+.condition-top select { flex: 1; }
+.condition-top .btn-remove { flex-shrink: 0; }
+.condition-comparison { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }
+.condition-comparison > * { flex: 1 1 85px; width: 0; }
+.negate-label { display: flex; align-items: center; gap: 6px; font-size: .72rem; color: var(--clr-muted); }
+.text-button { border: 0; background: none; color: var(--clr-primary); padding: 6px 0; font: inherit; font-size: .78rem; cursor: pointer; }
+.action-editor { margin-top: 8px; }
+.ventilation-app .program-editor .action-editor select { flex: 1; background: #fffbeb; border-color: #f59e0b; color: #92400e; }
+.stage-default { margin: 12px 0 8px; font-size: .75rem; color: var(--clr-muted); }
+
+.scenario-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin: 14px 0 8px; }
+.scenario-controls label { display: flex; flex: 1 1 150px; flex-direction: column; gap: 5px; font-size: .78rem; color: var(--clr-muted); min-width: 0; }
+.scenario-controls select { width: 100%; }
+.scenario-controls button { font-size: .78rem; padding: 5px 8px; }
+.room-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 14px 0 10px; }
+.room-card { border: 1px solid var(--clr-border); border-radius: 8px; padding: 10px; background: var(--clr-bg); }
+.room-card.room-active { background: var(--clr-primary-light); border-color: var(--clr-primary); }
+.room-heading { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+.room-heading h3 { font-size: .88rem; }
+.room-heading span { font-size: .68rem; color: var(--clr-muted); }
+.room-active .room-heading span { color: var(--clr-primary); font-weight: 700; }
+.occupancy-control { display: flex; gap: 5px; align-items: center; font-size: .75rem; margin-top: 8px; }
+.co2-control { display: block; font-size: .72rem; color: var(--clr-muted); margin-top: 8px; }
+.co2-control > div { display: flex; align-items: baseline; gap: 4px; margin-top: 3px; }
+.co2-control input { width: 100%; }
+.co2-control span { font-size: .68rem; }
+.room-state { display: flex; flex-direction: column; gap: 2px; font-size: .72rem; margin-top: 8px; color: var(--clr-muted); }
+.room-state strong { color: var(--clr-text); margin-left: 3px; }
+.fan-state { padding: 10px; background: var(--clr-bg); border-radius: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.fan-state.running { background: var(--clr-primary-light); }
+.fan-state > div { flex: 1; }
+.fan-state strong { font-size: .84rem; display: block; }
+.fan-state > div > span { font-size: .72rem; color: var(--clr-muted); display: block; }
+.fan-state label { display: flex; gap: 5px; align-items: center; font-size: .74rem; white-space: nowrap; }
+.prediction-box { display: grid; gap: 8px; border-top: 1px solid var(--clr-border); padding-top: 14px; margin-top: 14px; }
+.prediction-box label { font-weight: 600; font-size: .8rem; }
+.prediction-box select { width: 100%; display: block; margin-top: 6px; }
+.prediction-box input { width: 100%; }
+.execution-feedback { margin-top: 14px; padding: 12px; border-radius: 8px; font-size: .8rem; }
+.execution-feedback.is-correct { background: #d1fae5; }
+.execution-feedback.is-different { background: #fef3c7; }
+.execution-feedback p { margin-top: 6px; }
+.execution-feedback summary { cursor: pointer; margin-top: 10px; font-size: .75rem; }
+.state-comparison { margin-top: 10px; }
+.state-comparison td { font-size: .72rem; }
+.trace-wrap { margin-top: 16px; }
+.trace-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 8px; }
+.trace-heading h3 { font-size: .83rem; }
+.trace-heading span { font-size: .72rem; color: var(--clr-muted); }
+.table-scroll { overflow-x: auto; }
+.trace-table { font-size: .72rem; white-space: nowrap; }
+.trace-table small { display: block; color: var(--clr-muted); }
+.trace-mismatch td:last-child { color: #92400e; }
+.simulation-empty { padding: 16px 0 0; font-size: .77rem; color: var(--clr-muted); }
+.reflection-fields { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--clr-border); display: grid; gap: 8px; }
+.reflection-fields .env-group-label { margin: 0; }
+.reflection-fields textarea { width: 100%; resize: vertical; }
+.reflection-fields button { justify-self: start; }
+.fallback-label { display: block; margin-top: 6px; opacity: .7; font-size: .68rem; }
+.cancel-discussion { margin-top: 8px; align-self: start; }
+.lab-messages { width: 100%; max-width: 1400px; margin: 12px auto 0; padding: 0 24px; }
+.lab-error, .lab-notice { padding: 10px 12px; border-radius: 8px; font-size: .8rem; }
+.lab-error { color: #991b1b; background: #fee2e2; }
+.lab-notice { color: var(--clr-primary-dark); background: var(--clr-primary-light); }
+.lab-error button { margin-left: 12px; }
+.lab-loading { margin: 40px auto; text-align: center; max-width: 650px; padding: 20px; }
+.lab-loading button { margin: 16px 8px; }

@@ -1,24 +1,21 @@
-import json
 import os
 import re
 from typing import Any, Dict, List, Optional
-from urllib import error as urllib_error
-from urllib import request as urllib_request
 
 from domain import draft_signature, rule_signature
+from llm_clients import (
+    GenerationOptions,
+    LLMMessage,
+    OllamaClient,
+    create_llm_client,
+    resolve_llm_config,
+)
 from prompts import build_message_payload, build_system_instruction
 from schemas import AdviceRequest
 
 
 def get_llm_provider() -> str:
-    provider = os.environ.get("LLM_PROVIDER", "auto").strip().lower()
-    if provider in ("gemini", "ollama", "fallback"):
-        return provider
-    if os.environ.get("GEMINI_API_KEY"):
-        return "gemini"
-    if os.environ.get("OLLAMA_MODEL"):
-        return "ollama"
-    return "fallback"
+    return resolve_llm_config().provider
 
 
 def request_ollama_chat(
@@ -27,83 +24,61 @@ def request_ollama_chat(
     temperature: float = 0.7,
     num_predict: Optional[int] = None,
 ) -> str:
-    model_name = os.environ.get("OLLAMA_MODEL")
+    model_name = os.environ.get("OLLAMA_MODEL", "")
     if not model_name:
         raise ValueError("OLLAMA_MODEL が未設定です")
-
-    options: Dict[str, Any] = {"temperature": temperature}
-    if num_predict is not None:
-        options["num_predict"] = num_predict
-
-    base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-    timeout_seconds = int(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "60"))
-    payload = {
-        "model": model_name,
-        "messages": messages,
-        "stream": False,
-        "options": options,
-    }
-    request = urllib_request.Request(
-        url=f"{base_url.rstrip('/')}/api/chat",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    result = OllamaClient(model_name).chat(
+        [
+            LLMMessage(role=message["role"], content=message["content"])
+            for message in messages
+        ],
+        GenerationOptions(temperature=temperature, max_tokens=num_predict),
     )
-
-    try:
-        with urllib_request.urlopen(request, timeout=timeout_seconds) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except urllib_error.URLError as error:
-        raise RuntimeError(f"Ollama 接続エラー: {error}") from error
-
-    content = data.get("message", {}).get("content")
-    if not content:
-        raise RuntimeError("Ollama 応答が空でした")
-    return content
+    return result.text
 
 
 def generate_with_gemini(req: AdviceRequest, user_text: str) -> str:
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY が未設定です")
-
-    from google import genai
-    from google.genai import types
-
-    history = [
-        types.Content(
-            role="user" if message.role == "user" else "model",
-            parts=[types.Part(text=message.text)],
-        )
-        for message in (req.history or [])[-10:]
-    ]
-    chat = genai.Client(api_key=api_key).chats.create(
-        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        config=types.GenerateContentConfig(
-            system_instruction=build_system_instruction(req.phase or 2, req),
-            max_output_tokens=2048,
-            temperature=0.7,
-        ),
-        history=history,
-    )
-    return chat.send_message(build_message_payload(user_text, req)).text
+    return _generate_with_client(req, user_text, provider="gemini")
 
 
 def generate_with_ollama(req: AdviceRequest, user_text: str) -> str:
+    return _generate_with_client(req, user_text, provider="ollama")
+
+
+def _advice_messages(req: AdviceRequest, user_text: str) -> List[LLMMessage]:
     messages = [
-        {"role": "system", "content": build_system_instruction(req.phase or 2, req)}
+        LLMMessage(
+            role="system",
+            content=build_system_instruction(req.phase or 2, req),
+        )
     ]
     messages.extend(
-        {
-            "role": "assistant" if message.role == "ai" else "user",
-            "content": message.text,
-        }
+        LLMMessage(
+            role="assistant" if message.role == "ai" else "user",
+            content=message.text,
+        )
         for message in (req.history or [])[-10:]
     )
     messages.append(
-        {"role": "user", "content": build_message_payload(user_text, req)}
+        LLMMessage(
+            role="user",
+            content=build_message_payload(user_text, req),
+        )
     )
-    return request_ollama_chat(messages)
+    return messages
+
+
+def _generate_with_client(
+    req: AdviceRequest,
+    user_text: str,
+    *,
+    provider: Optional[str] = None,
+) -> str:
+    client = create_llm_client(provider=provider)
+    return client.chat(
+        _advice_messages(req, user_text),
+        GenerationOptions(temperature=0.7, max_tokens=2048),
+    ).text
 
 
 def parse_program_draft(message: str) -> Dict[str, Any]:
@@ -196,17 +171,23 @@ def generate_advice(req: AdviceRequest) -> Dict[str, Any]:
     from domain import fallback_response
 
     user_text = req.current_message or "今のプログラムについてコメントしてください。"
-    provider = get_llm_provider()
-    if provider == "fallback":
+    config = resolve_llm_config()
+    if config.provider == "fallback":
         return {"message": fallback_response(req), "program_draft": []}
 
     try:
-        generated = (
-            generate_with_gemini(req, user_text)
-            if provider == "gemini"
-            else generate_with_ollama(req, user_text)
+        client = create_llm_client()
+        result = client.chat(
+            _advice_messages(req, user_text),
+            GenerationOptions(temperature=0.7, max_tokens=2048),
         )
-        return remove_repeated_drafts(req, parse_program_draft(generated))
+        response = remove_repeated_drafts(req, parse_program_draft(result.text))
+        response["llm"] = {
+            "provider": result.provider,
+            "model": result.model,
+            "elapsed_ms": result.elapsed_ms,
+        }
+        return response
     except Exception as error:
-        label = "Gemini" if provider == "gemini" else "Ollama"
+        label = "Gemini" if config.provider == "gemini" else "Ollama"
         return {"message": f"{label} API エラー: {error}", "program_draft": []}

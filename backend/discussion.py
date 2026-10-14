@@ -1,8 +1,12 @@
 import os
-from typing import Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from domain import describe_rules, describe_scenarios
-from llm_service import get_llm_provider, request_ollama_chat
+from llm_clients import (
+    GenerationOptions,
+    LLMMessage,
+    create_llm_client,
+)
 from prompts import get_system_prompt
 from schemas import AdviceRequest, ChatMessage
 
@@ -180,7 +184,25 @@ def compose_group_message(agent: Dict[str, str], reaction: str) -> str:
     )
 
 
-def fallback_discussion() -> List[Dict[str, str]]:
+def fallback_metadata() -> Dict[str, Any]:
+    return {
+        "provider": "fallback",
+        "model": "rule-based",
+        "elapsed_ms": 0,
+        "fallback": True,
+    }
+
+
+def result_metadata(result, *, fallback: bool = False) -> Dict[str, Any]:
+    return {
+        "provider": result.provider,
+        "model": result.model,
+        "elapsed_ms": result.elapsed_ms,
+        "fallback": fallback,
+    }
+
+
+def fallback_discussion() -> List[Dict[str, Any]]:
     turns = [
         {
             "role": "group",
@@ -189,6 +211,7 @@ def fallback_discussion() -> List[Dict[str, str]]:
             "text": compose_group_message(
                 agent, GROUP_FALLBACK_REACTIONS[agent["id"]]
             ),
+            "llm": fallback_metadata(),
         }
         for agent in GROUP_AGENTS
     ]
@@ -202,32 +225,49 @@ def fallback_discussion() -> List[Dict[str, str]]:
                 "Cグループは昼のチャイムに注目しました。"
                 "自分のプログラムを4つの場面で動かすと、どのグループと似た問題が起きそうですか？"
             ),
+            "llm": fallback_metadata(),
         }
     )
     return turns
 
 
-def generate_discussion(req: AdviceRequest) -> Iterator[Dict[str, str]]:
+def generate_discussion(req: AdviceRequest) -> Iterator[Dict[str, Any]]:
     user_text = req.current_message or (
         "各グループのプログラムを比べて、気づいたことを話し合いたいです。"
     )
-    if get_llm_provider() != "ollama":
-        yield from fallback_discussion()
-        return
-
     turns = []
-    num_predict = int(os.environ.get("OLLAMA_GROUP_NUM_PREDICT", "140"))
+    group_max_tokens = int(
+        os.environ.get(
+            "GROUP_MAX_TOKENS",
+            os.environ.get("OLLAMA_GROUP_NUM_PREDICT", "140"),
+        )
+    )
     for agent in GROUP_AGENTS:
         messages = [
-            {"role": "system", "content": build_group_system_prompt(agent)},
-            {"role": "user", "content": build_group_user_prompt(req, user_text, turns)},
+            LLMMessage(
+                role="system",
+                content=build_group_system_prompt(agent),
+            ),
+            LLMMessage(
+                role="user",
+                content=build_group_user_prompt(req, user_text, turns),
+            ),
         ]
+        metadata = fallback_metadata()
         try:
-            reaction = request_ollama_chat(
-                messages, temperature=0.45, num_predict=num_predict
-            ).strip()
+            client = create_llm_client(role=agent["id"])
+            result = client.chat(
+                messages,
+                GenerationOptions(
+                    temperature=0.45,
+                    max_tokens=group_max_tokens,
+                ),
+            )
+            reaction = result.text.strip()
+            metadata = result_metadata(result)
             if not valid_group_reaction(reaction):
                 reaction = GROUP_FALLBACK_REACTIONS[agent["id"]]
+                metadata["fallback"] = True
         except Exception:
             reaction = GROUP_FALLBACK_REACTIONS[agent["id"]]
 
@@ -236,6 +276,7 @@ def generate_discussion(req: AdviceRequest) -> Iterator[Dict[str, str]]:
             "speaker": agent["speaker"],
             "agent_id": agent["id"],
             "text": compose_group_message(agent, reaction),
+            "llm": metadata,
         }
         turns.append(turn)
         yield turn
@@ -247,18 +288,33 @@ A・B・Cグループは、それぞれ別のAI呼び出しで独立して考え
 あなたは司会に専念し、存在しない追加発言を作らず、提示された発言だけを整理してください。
 """
     messages = [
-        {"role": "system", "content": facilitator_system},
-        {"role": "user", "content": build_facilitator_prompt(req, user_text, turns)},
+        LLMMessage(role="system", content=facilitator_system),
+        LLMMessage(
+            role="user",
+            content=build_facilitator_prompt(req, user_text, turns),
+        ),
     ]
+    facilitator_metadata = fallback_metadata()
     try:
-        facilitator_text = request_ollama_chat(
+        client = create_llm_client(role="facilitator")
+        result = client.chat(
             messages,
-            temperature=0.3,
-            num_predict=int(os.environ.get("OLLAMA_FACILITATOR_NUM_PREDICT", "160")),
-        ).strip()
+            GenerationOptions(
+                temperature=0.3,
+                max_tokens=int(
+                    os.environ.get(
+                        "FACILITATOR_MAX_TOKENS",
+                        os.environ.get("OLLAMA_FACILITATOR_NUM_PREDICT", "160"),
+                    )
+                ),
+            ),
+        )
+        facilitator_text = result.text.strip()
+        facilitator_metadata = result_metadata(result)
         if not valid_facilitator_message(facilitator_text):
             raise ValueError("司会AIの応答が教材の制約を満たしませんでした")
     except Exception:
+        facilitator_metadata["fallback"] = True
         facilitator_text = (
             "Aグループは人がいない夜のチャイム、Bグループは昼に人が来たときのドア、"
             "Cグループは昼のチャイムに注目しました。"
@@ -271,4 +327,5 @@ A・B・Cグループは、それぞれ別のAI呼び出しで独立して考え
         "speaker": "司会AI",
         "agent_id": "facilitator",
         "text": facilitator_text,
+        "llm": facilitator_metadata,
     }
