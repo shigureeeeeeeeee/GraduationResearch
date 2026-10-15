@@ -3,14 +3,14 @@ import os
 import re
 from threading import Lock
 from datetime import datetime, timezone
+from pathlib import Path
 
 from llm_clients import GenerationOptions, LLMMessage, create_llm_client
-from schemas import PromptsConfig
-from storage import DATA_DIR
 from ventilation_content import GROUPS, SCENARIOS, TASK_ID, TASK_SPEC, goal_example_program
 from ventilation_engine import OUTPUT_LABELS, simulate
-from ventilation_models import TestInput
+from ventilation_models import PromptsConfig, TestInput
 
+DATA_DIR = Path(__file__).parent / "data"
 PROMPT_FILE = DATA_DIR / "ventilation_numeric_goals_prompts.json"
 LOG_FILE = DATA_DIR / "ventilation_sessions.jsonl"
 LOG_LOCK = Lock()

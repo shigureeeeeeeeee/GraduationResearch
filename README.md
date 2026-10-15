@@ -76,7 +76,7 @@ npm run build
 
 ## 元のコンビニ課題
 
-以下は研究の出発点となった課題です。現在の画面は換気課題に置き換えていますが、既存の `/api/advice` などの互換APIは残しています。
+以下は研究の出発点となった課題です。現在の画面は換気課題に置き換えており、この課題のコードは削除済みです（git の履歴に残っています）。
 
 コンビニの入り口センサーを使って、以下の条件を満たすプログラムを作る。
 
@@ -141,13 +141,9 @@ ollama pull qwen2.5:7b-instruct
 LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen2.5:7b-instruct
-AI_INCLUDE_PROGRAM_DRAFT=true
-AI_PROGRAM_DRAFT_MAX_RULES=1
 GROUP_MAX_TOKENS=140
 FACILITATOR_MAX_TOKENS=160
 ```
-
-`AI_INCLUDE_PROGRAM_DRAFT` は旧コンビニ課題の助言API用です。換気課題ではAIが完成プログラム案を返す機能は使用しません。
 
 フェーズ4では、A・B・Cグループと司会をそれぞれ独立したLLM呼び出しとして実行します。
 A→B→Cの順に前の発言を参照し、最後に司会AIが相違点を整理して問いかけます。
@@ -203,14 +199,13 @@ npm run dev
 graduation-research/
 ├── README.md
 ├── backend/
-│   ├── main.py               # FastAPI アプリとエンドポイント
-│   ├── schemas.py            # APIのデータモデル
-│   ├── domain.py             # ルール評価とフォールバック応答
-│   ├── prompts.py            # フェーズ別プロンプト生成
+│   ├── main.py               # FastAPI アプリ（換気課題のルーターを登録）
+│   ├── ventilation_api.py    # 換気課題のエンドポイント
+│   ├── ventilation_models.py # APIのデータモデル
+│   ├── ventilation_content.py# 課題文・シナリオ・グループ案
+│   ├── ventilation_engine.py # シミュレーションと評価
+│   ├── ventilation_service.py# 対話生成、プロンプト設定、ログの保存
 │   ├── llm_clients.py        # Gemini / Ollama共通クライアントと役割別設定
-│   ├── llm_service.py        # 共通クライアントを使った助言生成
-│   ├── discussion.py         # フェーズ4のグループ討論
-│   ├── storage.py            # プロンプト設定とログの保存
 │   ├── requirements.txt
 │   └── .env.example
 └── frontend/
@@ -219,75 +214,10 @@ graduation-research/
     ├── index.html
     └── src/
         ├── main.js
-        ├── App.vue           # 画面全体の状態とコンポーネントの組み立て
-        ├── config.js         # フェーズ・条件・シナリオ定義
-        ├── components/       # 各画面パネル
-        ├── domain/           # シミュレーションロジック
+        ├── App.vue           # VentilationLab を表示
+        ├── components/       # 各画面パネル（VentilationLab が画面全体の状態を管理）
         └── services/         # バックエンドAPI通信
 ```
-
----
-
-## 元のコンビニ課題のAPI仕様（互換用）
-
-### `POST /api/advice`
-
-**リクエスト**
-
-```json
-{
-  "rules": [
-    {
-      "id": "1",
-      "conditions": [
-        { "type": "person_sensor" },
-        { "type": "dark_sensor" }
-      ],
-      "action": "bell"
-    }
-  ],
-  "environment": {
-    "personPresent": true,
-    "isDark": true
-  },
-  "result": {
-    "doorOpen": false,
-    "bellRinging": true,
-    "doorCorrect": false,
-    "bellCorrect": true,
-    "allCorrect": false
-  },
-  "history": [
-    { "role": "ai", "text": "こんにちは！..." },
-    { "role": "user", "text": "夜だけベルが鳴るようにしたい" }
-  ]
-}
-```
-
-**レスポンス**
-
-```json
-{
-  "message": "夜にお客さんが来ていないとき、ベルはどうなりますか？..."
-}
-```
-
-### `POST /api/group-discussion`
-
-フェーズ4専用。リクエスト形式は `/api/advice` と同じです。A・B・C・司会の順に、話者別の発言を返します。
-
-```json
-{
-  "turns": [
-    { "role": "group", "speaker": "Aグループ", "agent_id": "group_a", "text": "..." },
-    { "role": "group", "speaker": "Bグループ", "agent_id": "group_b", "text": "..." },
-    { "role": "group", "speaker": "Cグループ", "agent_id": "group_c", "text": "..." },
-    { "role": "ai", "speaker": "司会AI", "agent_id": "facilitator", "text": "..." }
-  ]
-}
-```
-
-`POST /api/group-discussion/stream` は同じ処理を行い、上記の各要素を1行1JSONのJSON Lines形式で順次返します。
 
 ---
 

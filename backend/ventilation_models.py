@@ -33,6 +33,13 @@ STAGES = [
 ]
 
 
+class PromptsConfig(BaseModel):
+    base: str
+    phase2_extra: str
+    phase3_extra: str
+    phase4_extra: str
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

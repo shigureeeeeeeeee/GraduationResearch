@@ -1,6 +1,5 @@
 <script setup>
 import { nextTick, ref } from 'vue'
-import { GROUP_DISCUSSION_EXAMPLES } from '../config'
 
 const props = defineProps({
   visible: { type: Boolean, required: true },
@@ -12,7 +11,7 @@ const props = defineProps({
   messages: { type: Array, required: true },
   loading: { type: Boolean, required: true },
   modelValue: { type: String, required: true },
-  groupExamples: { type: Array, default: () => GROUP_DISCUSSION_EXAMPLES },
+  groupExamples: { type: Array, default: () => [] },
   groupDescription: { type: String, default: '各グループは下の案から考え始め、ほかの発言を聞いて考え直すこともあります。' },
   disabled: Boolean,
 })

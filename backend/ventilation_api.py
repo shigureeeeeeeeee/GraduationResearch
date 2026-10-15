@@ -3,10 +3,9 @@ import json
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from schemas import PromptsConfig
 from ventilation_content import public_config
 from ventilation_engine import simulate
-from ventilation_models import AdviceRequest, SessionLog, SimulationRequest
+from ventilation_models import AdviceRequest, PromptsConfig, SessionLog, SimulationRequest
 import ventilation_service as service
 
 router = APIRouter(prefix="/api/ventilation", tags=["ventilation"])

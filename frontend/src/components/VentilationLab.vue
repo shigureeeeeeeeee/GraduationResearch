@@ -241,7 +241,7 @@ onBeforeUnmount(() => chatAbort?.abort())
 
 <template>
   <div class="app ventilation-app">
-    <SettingsDrawer task="ventilation" />
+    <SettingsDrawer />
     <div class="problem-banner">
       <div class="problem-inner">
         <span class="problem-label">課題</span>
