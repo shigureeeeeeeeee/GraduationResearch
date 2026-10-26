@@ -15,9 +15,9 @@ PROMPT_FILE = DATA_DIR / "ventilation_numeric_goals_prompts.json"
 LOG_FILE = DATA_DIR / "ventilation_sessions.jsonl"
 LOG_LOCK = Lock()
 DEFAULT_PROMPTS = {
-    "base": "あなたは大学生のプログラミング学習の対話相手です。2室の換気制御について、省察を促してください。唯一の正解を想定せず、目的・制限・判断の根拠を検討してください。渡されたプログラムと実行履歴を読み、ルールを聞き返さず、具体的な場面に触れてください。完成プログラムを提示せず、予想・根拠・反例について最後に問いを1つ出してください。応答は短く、日本語で完結させてください。",
+    "base": "あなたは大学生のプログラミング学習の対話相手です。2室の換気制御について、省察を促してください。唯一の正解を想定せず、目的・制限・判断の根拠を検討してください。渡されたプログラムと実行履歴を読み、ルールを聞き返さず、具体的な場面に触れてください。完成プログラムを提示せず、予想・根拠・反例について最後に問いを1つ出してください。応答は短く、日本語で完結させてください。時間は「ステップ」と言わず「分」で表してください。",
     "phase2_extra": "ペアの友達として、条件を選んだ理由や、別の状況でどうなるかを一緒に考えてください。",
-    "phase3_extra": "実行前の予想と実際の動作、制約違反、未対応時間や必要のない運転を検討してください。異なる優先順位を誤りと断定せず、複数の目的の間のトレードオフと判断の根拠を尋ねてください。",
+    "phase3_extra": "実際の動作、制約違反、未対応時間や必要のない運転を検討してください。異なる優先順位を誤りと断定せず、複数の目的の間のトレードオフと判断の根拠を尋ねてください。",
     "phase4_extra": "全体対話の司会として、A・B・Cグループの根拠を比較してください。提示された事実に基づき、学習者の案を見直す問いを1つ出してください。新しい架空のグループ発言を作らないでください。",
 }
 
@@ -47,6 +47,9 @@ def append_log(entry):
     record.update({"timestamp": datetime.now(timezone.utc).isoformat(), "task_id": entry.task_id,
                    "evaluation": result,
                    "chat_history": record.pop("history")})
+    if entry.event == "run_all" and entry.task_id == TASK_ID:
+        # Recompute on the server so the log does not depend on what the browser displayed.
+        record["test_cases"] = simulate_all(entry.program)
     if entry.task_id == "ventilation-v1":
         record["all_correct"] = result["all_correct"]
     else:
@@ -61,6 +64,17 @@ def append_log(entry):
         with LOG_FILE.open("a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
     return record
+
+
+def simulate_all(program):
+    """Run the program over every test case. The same summary is shown to learners and kept in run_all logs."""
+    cases = []
+    for scenario in SCENARIOS:
+        result = simulate(program, [TestInput.model_validate(step) for step in scenario["steps"]])
+        cases.append({"id": scenario["id"], "label": scenario["label"], "minutes": len(scenario["steps"]),
+                      "goals_met": result["achievement"]["all_met"], "checks": result["achievement"]["checks"],
+                      "urgent_unserved": result["metrics"]["urgent_unserved_room_steps"]})
+    return {"cases": cases, "all_met": all(case["goals_met"] for case in cases)}
 
 
 def read_logs():
@@ -108,20 +122,20 @@ def fallback_advice(req):
 def advice_evidence(req):
     result = simulate(req.program, req.steps, baseline=req.baseline)
     if not req.steps:
-        return "今のプログラムはまだ実行されていません。自分の方針で次の動作を予想し、経過を確かめてみましょう。"
+        return "今のプログラムはまだ実行されていません。テストケースを選んで実行し、動きを確かめてみましょう。"
     m = result["metrics"]
-    lines = [f"実行した{len(req.steps)}ステップのうち、制約違反は{m['violation_steps']}ステップでした。",
-             f"有人かつ濃度の目安以上の部屋への対応は{m['served_room_steps']} / {m['needs_room_steps']}部屋ステップ、未対応は延べ{m['unserved_room_steps']}部屋ステップです。",
-             f"参考待ち時間の最大値はA室{m['max_wait']['A']}、B室{m['max_wait']['B']}ステップです。"]
+    lines = [f"実行した{len(req.steps)}分のうち、制約違反は{m['violation_steps']}分でした。",
+             f"有人かつ濃度の目安以上の部屋への対応は{m['served_room_steps']} / {m['needs_room_steps']}分、未対応は延べ{m['unserved_room_steps']}分です。",
+             f"参考待ち時間の最大値はA室{m['max_wait']['A']}、B室{m['max_wait']['B']}分です。"]
     lines += [f"{check['label']}：{'達成' if check['met'] else '未達'}（実測{check['actual']}）。"
               for check in result["achievement"]["checks"]]
-    lines.append(f"改善指標：1,500ppm以上の有人室の未対応は延べ{m['urgent_unserved_room_steps']}部屋ステップです。")
+    lines.append(f"改善指標：1,500ppm以上の有人室の未対応は延べ{m['urgent_unserved_room_steps']}分です。")
     comparison = result.get("comparison")
     if comparison and comparison["comparable"]:
-        lines.append(f"同じ入力での修正前は{comparison['previous']}、現在は{comparison['current']}部屋ステップです。")
+        lines.append(f"同じ入力での修正前は{comparison['previous']}、現在は{comparison['current']}分です。")
     first = next((row for row in result["trace"] if row["violations"]), None)
     if first:
-        lines.append(f"ステップ{first['step']}の動作は「{OUTPUT_LABELS[first['after']['output']]}」です。" + " ".join(first["violations"]))
+        lines.append(f"{first['step']}分目の動作は「{OUTPUT_LABELS[first['after']['output']]}」です。" + " ".join(first["violations"]))
     lines.append("達成状況はこの実行範囲に限ります。停止制限の時間も未対応に含めます。改善指標は同じ入力で修正前後を比べましょう。")
     return "\n".join(lines)
 
@@ -176,11 +190,11 @@ def group_evidence(group):
     result = simulate(goal_example_program(group["id"]), [TestInput.model_validate(s) for s in scenario["steps"]])
     m = result["metrics"]
     return (f"私たちの案を「{scenario['label']}」で実行しました。"
-            f"制約違反は{m['violation_steps']}ステップ、目安以上の部屋への未対応は延べ{m['unserved_room_steps']}部屋ステップ、"
+            f"制約違反は{m['violation_steps']}分、目安以上の部屋への未対応は延べ{m['unserved_room_steps']}分、"
             f"参考待ち時間の最大値はA室{m['max_wait']['A']}・B室{m['max_wait']['B']}です。"
             f"無人・800ppm以下への運転は{m['unnecessary_ventilation_steps']}回でした。"
-            f"この経過での数値基準は{'達成' if result['achievement']['all_met'] else '未達'}です。"
-            f"1,500ppm以上の未対応は延べ{m['urgent_unserved_room_steps']}部屋ステップでした。")
+            f"このテストケースでの数値基準は{'達成' if result['achievement']['all_met'] else '未達'}です。"
+            f"1,500ppm以上の未対応は延べ{m['urgent_unserved_room_steps']}分でした。")
 
 
 def generate_discussion(req):

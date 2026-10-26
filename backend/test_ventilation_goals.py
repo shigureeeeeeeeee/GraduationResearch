@@ -114,6 +114,52 @@ class GoalApiAndLoggingTest(unittest.TestCase):
                     self.assertEqual("goals_met" in record, task_id == "ventilation-goals-v3")
         self.assertEqual(SessionLog(program=Program(), session_id="old", event_id="old", event="reset").task_id, "ventilation-v1")
 
+    def test_step_logs_accept_no_predictions_but_reject_partial_ones(self):
+        common = dict(task_id="ventilation-goals-v3", program=Program(), steps=[TestInput(), TestInput()],
+                      session_id="s", event_id="e", event="step")
+        self.assertEqual(SessionLog(**common).predictions, [])
+        self.assertEqual(len(SessionLog(**common, predictions=[{"output": "stop"}] * 2).predictions), 2)
+        with self.assertRaises(ValueError):
+            SessionLog(**common, predictions=[{"output": "stop"}])
+
+
+class AllCasesTest(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def answer_program(self):
+        program = example_program("complete").model_dump()
+        program["selection"] = [rule("s_wait", "wait", condition("wait", 3, "gte")),
+                                rule("s_urgent", "co2", condition("co2", 1500, "gte")),
+                                rule("s_keep", "co2", condition("was_served")), rule("s_co2", "co2")]
+        return program
+
+    def test_runs_every_test_case_in_order(self):
+        data = self.client.post("/api/ventilation/simulate-all", json={"program": self.answer_program()}).json()
+        self.assertEqual([case["id"] for case in data["cases"]], [s["id"] for s in SCENARIOS])
+        self.assertTrue(data["all_met"])
+        self.assertEqual([case["minutes"] for case in data["cases"]], [len(s["steps"]) for s in SCENARIOS])
+
+    def test_empty_program_and_urgent_first_fail_some_cases(self):
+        empty = self.client.post("/api/ventilation/simulate-all", json={"program": Program().model_dump()}).json()
+        self.assertFalse(empty["all_met"])
+        urgent_first = example_program("complete").model_dump()
+        data = self.client.post("/api/ventilation/simulate-all", json={"program": urgent_first}).json()
+        failed = [case["id"] for case in data["cases"] if not case["goals_met"]]
+        self.assertEqual(failed, ["urgent"])
+
+    def test_run_all_log_keeps_server_computed_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("ventilation_service.LOG_FILE", Path(directory) / "logs.jsonl"):
+                entry = SessionLog(task_id="ventilation-goals-v3", program=Program.model_validate(self.answer_program()),
+                                   session_id="s", event_id="run-all", event="run_all", scenario_id="all")
+                record = append_log(entry)
+                self.assertTrue(record["test_cases"]["all_met"])
+                self.assertEqual(len(record["test_cases"]["cases"]), len(SCENARIOS))
+                step = append_log(SessionLog(task_id="ventilation-goals-v3", program=Program(), steps=[TestInput()],
+                                             session_id="s", event_id="step", event="step"))
+                self.assertNotIn("test_cases", step)
+
 
 class NumericalGoalsTest(unittest.TestCase):
     def test_unserved_wait_four_is_allowed_but_five_is_not(self):

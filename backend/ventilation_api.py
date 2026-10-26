@@ -5,7 +5,7 @@ from fastapi.responses import StreamingResponse
 
 from ventilation_content import public_config
 from ventilation_engine import simulate
-from ventilation_models import AdviceRequest, PromptsConfig, SessionLog, SimulationRequest
+from ventilation_models import AdviceRequest, AllCasesRequest, PromptsConfig, SessionLog, SimulationRequest
 import ventilation_service as service
 
 router = APIRouter(prefix="/api/ventilation", tags=["ventilation"])
@@ -19,6 +19,11 @@ def config():
 @router.post("/simulate")
 def run_simulation(req: SimulationRequest):
     return simulate(req.program, req.steps, req.task_id, req.baseline)
+
+
+@router.post("/simulate-all")
+def run_all_cases(req: AllCasesRequest):
+    return service.simulate_all(req.program)
 
 
 @router.post("/advice")

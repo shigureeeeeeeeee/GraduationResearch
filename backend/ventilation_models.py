@@ -10,10 +10,10 @@ FIELDS = {
     "occupied": {"label": "この部屋に人がいる", "kind": "boolean"},
     "co2": {"label": "この部屋のCO₂濃度", "kind": "number"},
     "previous_demand": {"label": "この部屋の前回の換気要求", "kind": "boolean"},
-    "wait": {"label": "この部屋の要求待ち時間", "kind": "number"},
+    "wait": {"label": "この部屋の要求待ち時間（分）", "kind": "number"},
     "was_served": {"label": "前回この部屋を換気した", "kind": "boolean"},
     "maintenance": {"label": "点検モード", "kind": "boolean"},
-    "run": {"label": "装置の連続運転数", "kind": "number"},
+    "run": {"label": "装置が続けて運転した時間（分）", "kind": "number"},
     "previous_output": {"label": "前回の装置動作", "kind": "output"},
     "candidate": {"label": "今回選んだ部屋", "kind": "output"},
 }
@@ -26,7 +26,7 @@ STAGES = [
      "fields": ["occupied", "co2", "previous_demand", "wait", "was_served", "maintenance"],
      "actions": [{"value": "co2", "label": "濃度 → 待ち時間 → A室の順で選ぶ"}, {"value": "wait", "label": "待ち時間 → 濃度 → A室の順で選ぶ"}, {"value": "room_a", "label": "候補のA室を選ぶ"}, {"value": "room_b", "label": "候補のB室を選ぶ"}],
      "default": "どのルールでも選べなければ、候補は「停止」です。"},
-    {"id": "output", "label": "装置への命令", "description": "点検、連続運転数、前回と今回の部屋を調べ、今回の動作を決めます。",
+    {"id": "output", "label": "装置への命令", "description": "点検、続けて運転した時間、前回と今回の部屋を調べ、今回の動作を決めます。",
      "fields": ["maintenance", "run", "previous_output", "candidate"],
      "actions": [{"value": "stop", "label": "停止する"}, {"value": "selected", "label": "選んだ部屋を換気する"}],
      "default": "一致するルールがなければ、装置は停止します。"},
@@ -124,6 +124,10 @@ class SimulationRequest(StrictModel):
     baseline: Optional[SimulationBaseline] = None
 
 
+class AllCasesRequest(StrictModel):
+    program: Program
+
+
 class Message(StrictModel):
     role: Literal["ai", "user", "group"]
     text: str = Field(max_length=20000)
@@ -151,12 +155,13 @@ class SessionLog(AdviceRequest):
     task_id: Literal["ventilation-v1", "ventilation-goals-v2", "ventilation-goals-v3"] = "ventilation-v1"
     event_id: str = Field(min_length=1, max_length=100)
     session_id: str = Field(min_length=1, max_length=100)
-    event: Literal["step", "phase_complete", "session_end", "program_revision", "reset", "chat", "reflection"]
+    event: Literal["step", "phase_complete", "session_end", "program_revision", "reset", "chat", "reflection", "run_all"]
     scenario_id: str = Field(default="custom", max_length=100)
     next_program: Optional[Program] = None
 
     @model_validator(mode="after")
     def predictions_match_steps(self):
-        if len(self.predictions) != len(self.steps):
+        # 実行前の予想は廃止した。以前のログは各ステップに予想を持つため、空か一致のどちらかを受け付ける
+        if self.predictions and len(self.predictions) != len(self.steps):
             raise ValueError("予想と実行ステップの数が一致しません")
         return self

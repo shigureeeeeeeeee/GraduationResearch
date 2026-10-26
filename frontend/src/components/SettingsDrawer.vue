@@ -177,6 +177,7 @@ function downloadCsv() {
             ログダッシュボード
           </button>
         </div>
+        <div v-if="$slots.session" class="settings-session"><slot name="session" /></div>
         <p class="settings-note">
           <template v-if="activeTab === 'prompts'">
             ここで編集したプロンプトはバックエンドに保存され、次のAI応答から反映されます。

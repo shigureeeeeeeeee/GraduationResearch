@@ -135,7 +135,7 @@ def simulate_reference(program, steps):
             if env.maintenance:
                 violations.append("点検中に装置が動いています。")
             if before["run"] >= 2:
-                violations.append("連続2ステップの運転後に停止していません。")
+                violations.append("2分続けて運転した後に停止していません。")
             if before["output"] not in ("stop", state["output"]):
                 violations.append("部屋の切り替えに停止を挟んでいません。")
         trace.append({"step": index, "input": env.model_dump(), "before": before,
@@ -172,7 +172,7 @@ def simulate(program, steps, task_id="ventilation-goals-v3", baseline=None):
             if env.maintenance:
                 violations.append("点検中に装置が動いています。")
             if before["run"] >= 2:
-                violations.append("連続2ステップの運転後に停止していません。")
+                violations.append("2分続けて運転した後に停止していません。")
             if before["output"] not in ("stop", output):
                 violations.append("部屋の切り替えに停止を挟んでいません。")
             metrics["ventilation_steps"] += 1
@@ -219,7 +219,7 @@ def simulate(program, steps, task_id="ventilation-goals-v3", baseline=None):
         metrics["unnecessary_ventilation_steps"] = (metrics["unoccupied_ventilation_steps"] +
                                                     metrics["low_concentration_ventilation_steps"])
         checks = [
-            {"id": "wait", "label": "連続未対応4ステップ以内", "actual": max(metrics["max_wait"].values()), "target": 4},
+            {"id": "wait", "label": "連続の放置は4分以内", "actual": max(metrics["max_wait"].values()), "target": 4},
             {"id": "unnecessary", "label": "無人・800ppm以下への運転0回", "actual": metrics["unnecessary_ventilation_steps"], "target": 0},
             {"id": "constraints", "label": "装置の制約違反0回", "actual": metrics["violation_steps"], "target": 0},
         ]

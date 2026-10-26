@@ -210,8 +210,9 @@ class VentilationApiTest(unittest.TestCase):
         self.assertNotIn("all_correct", logs[0])
         self.assertIn("metrics", logs[0]["evaluation"])
         self.assertEqual(len(logs[0]["evaluation"]["trace"]), 4)
+        # 予想は廃止したので空は受け付けるが、ステップ数と合わない予想は拒否する
         request["event_id"] = "event-2"
-        request["predictions"] = []
+        request["predictions"] = request["predictions"][:1]
         self.assertEqual(self.client.post("/api/ventilation/log", json=request).status_code, 422)
 
     def test_generated_explanation_cannot_replace_computed_facts(self):
