@@ -234,3 +234,58 @@
 .all-cases-table tr.failed .case-link { color: #991b1b; }
 .one-case-heading { margin-top: 4px; }
 .all-cases-table td:first-child, .all-cases-table th:first-child { text-align: left; }
+
+/* Phase 2-3: compare the pair's plan with the learner's */
+.compare-panel { margin-bottom: 12px; }
+.compare-panel > summary { display: flex; align-items: baseline; gap: 10px; cursor: pointer; font-size: .9rem; }
+.compare-panel > p { margin: 8px 0; }
+.compare-head { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: .74rem; font-weight: 700; color: var(--clr-muted); margin-top: 6px; }
+.compare-stage { border-top: 1px solid var(--clr-border); padding: 6px 0; }
+.compare-stage h4 { font-size: .78rem; display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.compare-stage.different h4 { color: #92400e; }
+.diff-chip { font-size: .66rem; font-weight: 700; color: white; background: #f59e0b; border-radius: 999px; padding: 0 7px; }
+.compare-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.compare-columns ol { margin: 0; padding-left: 16px; font-size: .72rem; line-height: 1.45; }
+.compare-columns li { margin-bottom: 3px; }
+.compare-columns li.only { background: #fef3c7; border-radius: 4px; }
+.compare-columns li.empty, .plan-rules li.empty { list-style: none; margin-left: -16px; color: var(--clr-muted); }
+
+/* Facts computed by the system, shown apart from what peers say */
+.chat-facts { align-self: stretch; border: 1px dashed #94a3b8; border-radius: 8px; background: #f8fafc; padding: 6px 10px; font-size: .74rem; color: #334155; }
+.chat-facts > span { display: block; font-size: .66rem; font-weight: 700; color: var(--clr-muted); margin-bottom: 2px; }
+.chat-facts p { white-space: pre-wrap; }
+.bubble-pair .bubble-text { border-left: 4px solid #10b981; }
+.bubble-facilitator .bubble-text { border-left: 4px solid #64748b; }
+
+/* Phase 4: plan board */
+.board-wrap { width: 100%; max-width: 1400px; margin: 12px auto 0; padding: 0 24px; }
+.plan-board { background: var(--clr-surface); border: 1px solid var(--clr-border); border-radius: 12px; padding: 14px 16px; }
+.board-steps { display: flex; flex-wrap: wrap; gap: 6px 16px; list-style: none; padding: 0; margin: 0 0 8px; font-size: .78rem; color: var(--clr-muted); }
+.board-steps .current { color: var(--clr-primary-dark); font-weight: 700; }
+.board-steps .done { text-decoration: line-through; }
+.board-instruction { font-size: .84rem; margin-bottom: 10px; }
+.board-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 1100px) { .board-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .board-cards { grid-template-columns: 1fr; } }
+.plan-card { border: 1px solid var(--clr-border); border-radius: 10px; padding: 10px; background: #f8fafc; display: flex; flex-direction: column; gap: 6px; }
+.plan-card.learner { background: #f0fdf4; }
+.plan-card.focus { border-color: var(--clr-primary); box-shadow: 0 0 0 2px var(--clr-primary-light); }
+.plan-card.chosen { border-color: #f59e0b; box-shadow: 0 0 0 2px #fde68a; }
+.plan-card header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: .84rem; }
+.plan-select { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+.plan-title { font-size: .72rem; color: var(--clr-muted); }
+.discussed-chip { margin-left: auto; font-size: .66rem; color: #065f46; background: #d1fae5; border-radius: 999px; padding: 0 7px; }
+.plan-results { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+.plan-results small { flex-basis: 100%; font-size: .68rem; color: var(--clr-muted); }
+.result-cell { width: 18px; height: 18px; line-height: 18px; text-align: center; border-radius: 4px; font-size: .7rem; font-weight: 700; }
+.result-cell.met { background: #d1fae5; color: #047857; }
+.result-cell.unmet { background: #fee2e2; color: #b91c1c; }
+.plan-rules summary { cursor: pointer; font-size: .74rem; color: var(--clr-primary-dark); }
+.plan-rules h5 { font-size: .7rem; margin: 6px 0 2px; }
+.plan-rules ol { margin: 0; padding-left: 16px; font-size: .7rem; line-height: 1.4; }
+.discuss-button { margin-top: auto; font-size: .76rem; }
+.board-choice { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-top: 10px; }
+.board-choice label { flex: 1 1 320px; display: flex; flex-direction: column; gap: 4px; font-size: .78rem; font-weight: 600; }
+.board-choice textarea { font: inherit; font-size: .8rem; border: 1px solid var(--clr-border); border-radius: 6px; padding: 6px 8px; resize: vertical; }
+.phase-jump { display: flex; align-items: center; gap: 6px; font-size: .78rem; }
+.phase-jump select { font: inherit; font-size: .78rem; padding: 3px 6px; border: 1px solid var(--clr-border); border-radius: 6px; }

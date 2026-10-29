@@ -129,7 +129,7 @@ class AllCasesRequest(StrictModel):
 
 
 class Message(StrictModel):
-    role: Literal["ai", "user", "group"]
+    role: Literal["ai", "user", "group", "system"]
     text: str = Field(max_length=20000)
     speaker: Optional[str] = None
     phase: int = Field(default=2, ge=1, le=4)
@@ -148,6 +148,16 @@ class AdviceRequest(SimulationRequest):
     phase: int = Field(default=2, ge=1, le=4)
     reflection: str = Field(default="", max_length=10000)
     predictions: List[Prediction] = Field(default_factory=list, max_length=200)
+    # フェーズ2でペアのAIが持つ案、フェーズ4で話し合っている案
+    pair_plan: Optional[Literal["group_a", "group_c"]] = None
+    focus_plan: Optional[Literal["group_a", "group_b", "group_c", "learner"]] = None
+
+
+class PlanChoice(StrictModel):
+    # フェーズ4で「一番よい」と選んだ案。before は話し合いの前、after は後
+    stage: Literal["before", "after"]
+    plan: Literal["group_a", "group_b", "group_c", "learner"]
+    reason: str = Field(default="", max_length=2000)
 
 
 class SessionLog(AdviceRequest):
@@ -155,9 +165,10 @@ class SessionLog(AdviceRequest):
     task_id: Literal["ventilation-v1", "ventilation-goals-v2", "ventilation-goals-v3"] = "ventilation-v1"
     event_id: str = Field(min_length=1, max_length=100)
     session_id: str = Field(min_length=1, max_length=100)
-    event: Literal["step", "phase_complete", "session_end", "program_revision", "reset", "chat", "reflection", "run_all"]
+    event: Literal["step", "phase_complete", "session_end", "program_revision", "reset", "chat", "reflection", "run_all", "choice", "phase_jump"]
     scenario_id: str = Field(default="custom", max_length=100)
     next_program: Optional[Program] = None
+    choice: Optional[PlanChoice] = None
 
     @model_validator(mode="after")
     def predictions_match_steps(self):

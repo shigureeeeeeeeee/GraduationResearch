@@ -135,4 +135,6 @@ def public_config():
     return {"task_id": TASK_ID, "evaluation_mode": "goals_and_constraints",
             "goals": GOALS, "improvement": IMPROVEMENT, "constraints": CONSTRAINTS, "guidance": GUIDANCE,
             "requirements": REQUIREMENTS, "stages": STAGES,
-            "fields": FIELDS, "scenarios": SCENARIOS, "groups": GROUPS}
+            "fields": FIELDS, "scenarios": SCENARIOS,
+            # 案の中身（ルールの文章・プログラム）は渡さない。全テストケースで達成するB案を最初から知らせないため
+            "groups": [{key: group[key] for key in ("id", "group", "title")} for group in GROUPS]}

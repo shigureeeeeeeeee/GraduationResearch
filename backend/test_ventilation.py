@@ -10,10 +10,10 @@ from fastapi.testclient import TestClient
 
 from main import app
 from llm_clients import LLMResult
-from ventilation_content import GROUPS, SCENARIOS, condition, example_program, rule
+from ventilation_content import goal_example_program, GROUPS, SCENARIOS, condition, example_program, rule
 from ventilation_engine import initial_state, learner_step, reference_step, simulate_reference as simulate
 from ventilation_models import AdviceRequest, Program, TestInput
-from ventilation_service import context_for, generate_discussion, group_evidence
+from ventilation_service import context_for, generate_discussion, plan_facts
 
 
 def inputs(scenario_id):
@@ -149,6 +149,7 @@ class VentilationApiTest(unittest.TestCase):
         self.assertEqual(len(response.json()["scenarios"]), 8)
         self.assertNotIn("コンビニ", response.text)
         self.assertNotIn('"program"', response.text)
+        self.assertNotIn("要求待ち時間が長い方を選ぶ", response.text)
 
     def test_api_rejects_invalid_rules_and_out_of_range_inputs(self):
         program = example_program("complete").model_dump()
@@ -167,22 +168,28 @@ class VentilationApiTest(unittest.TestCase):
         request = self.request_body()
         response = self.client.post("/api/ventilation/advice", json=request)
         self.assertEqual(response.status_code, 200)
-        self.assertIn("参考待ち時間", response.json()["message"])
+        self.assertIn("参考待ち時間", response.json()["facts"])
+        self.assertNotIn("参考待ち時間", response.json()["message"])
         self.assertTrue(response.json()["llm"]["fallback"])
         context = json.loads(context_for(AdviceRequest.model_validate(request)))
         self.assertEqual(context["predictions"][0]["reason"], "濃度で判断した")
         self.assertIn("metrics", context)
         self.assertNotIn("first_mismatch", context)
 
-    def test_discussion_stream_contains_computed_evidence_for_each_group(self):
-        response = self.client.post("/api/ventilation/group-discussion/stream", json=self.request_body())
+    def test_discussion_round_shows_computed_facts_then_peers_talk(self):
+        response = self.client.post("/api/ventilation/group-discussion/stream", json={**self.request_body(), "focus_plan": "group_a"})
         self.assertEqual(response.status_code, 200)
         self.assertIn("application/x-ndjson", response.headers["content-type"])
         turns = [json.loads(line) for line in response.text.splitlines()]
-        self.assertEqual([turn["agent_id"] for turn in turns], ["group_a", "group_b", "group_c", "facilitator"])
-        for group, turn in zip(GROUPS, turns):
-            self.assertIn(group_evidence(group), turn["text"])
-        self.assertTrue(all(turn["llm"]["fallback"] for turn in turns))
+        # 事実の枠 → 指摘する仲間（次のグループ）→ 案を作ったグループ → 司会役
+        self.assertEqual([turn["agent_id"] for turn in turns], ["system", "group_b", "group_a", "facilitator"])
+        self.assertIn(plan_facts(goal_example_program("group_a")), turns[0]["text"])
+        self.assertTrue(all(turn["llm"]["fallback"] for turn in turns[1:]))
+
+    def test_learner_message_about_own_plan_gets_a_peer_reply(self):
+        body = {**self.request_body(), "focus_plan": "learner", "current_message": "待ち時間を先に見たかった"}
+        turns = [json.loads(line) for line in self.client.post("/api/ventilation/group-discussion/stream", json=body).text.splitlines()]
+        self.assertEqual([turn["agent_id"] for turn in turns], ["group_a", "facilitator"])
 
     def test_role_clients_are_independent_and_see_previous_turns(self):
         calls = []
@@ -190,12 +197,12 @@ class VentilationApiTest(unittest.TestCase):
             def __init__(self, role): self.role = role
             def chat(self, messages, options):
                 calls.append((self.role, messages[-1].content))
-                return LLMResult(text="前の状態と今回の判断を比べると、どんな違いがありますか？", provider="fake", model=self.role, elapsed_ms=2)
+                return LLMResult(text="前の状態と今回の判断を比べると、どんな違いがある？", provider="fake", model=self.role, elapsed_ms=2)
         with patch("ventilation_service.create_llm_client", side_effect=lambda role=None: FakeClient(role)):
-            turns = list(generate_discussion(AdviceRequest.model_validate(self.request_body())))
-        self.assertEqual([role for role, _ in calls], ["group_a", "group_b", "group_c", "facilitator"])
-        self.assertIn(turns[0]["text"], calls[1][1])
-        self.assertTrue(all(not turn["llm"]["fallback"] for turn in turns))
+            turns = list(generate_discussion(AdviceRequest.model_validate({**self.request_body(), "focus_plan": "group_a"})))
+        self.assertEqual([role for role, _ in calls], ["group_b", "group_a", "facilitator"])
+        self.assertIn(turns[1]["text"], calls[1][1])
+        self.assertTrue(all(not turn["llm"]["fallback"] for turn in turns[1:]))
 
     def test_logs_preserve_predictions_revision_and_server_evaluation_idempotently(self):
         request = {**self.request_body(), "session_id": "test-session", "event_id": "event-1", "event": "program_revision",
@@ -226,9 +233,8 @@ class VentilationApiTest(unittest.TestCase):
             with patch("ventilation_service.create_llm_client", return_value=fake):
                 response = self.client.post("/api/ventilation/advice", json=self.request_body()).json()
             self.assertTrue(response["llm"]["fallback"])
-            self.assertIn("制約違反", response["message"])
-            self.assertIn("参考待ち時間", response["message"])
-            self.assertNotIn("仕様上", response["message"])
+            self.assertIn("制約違反", response["facts"])
+            self.assertIn("参考待ち時間", response["facts"])
             self.assertNotIn(text, response["message"])
 
     def test_repeated_question_punctuation_is_normalized(self):

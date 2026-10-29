@@ -9,7 +9,10 @@ from main import app
 from ventilation_content import SCENARIOS, example_program, goal_example_program, rule, condition
 from ventilation_engine import simulate
 from ventilation_models import AdviceRequest, Program, SessionLog, SimulationBaseline, TestInput
-from ventilation_service import append_log, context_for
+from ventilation_service import append_log, context_for, first_problem, generate_discussion, normalize_question, plan_facts, valid_question
+from llm_clients import LLMResult
+from ventilation_describe import program_differences
+import os
 
 
 class GoalEvaluationTest(unittest.TestCase):
@@ -121,6 +124,106 @@ class GoalApiAndLoggingTest(unittest.TestCase):
         self.assertEqual(len(SessionLog(**common, predictions=[{"output": "stop"}] * 2).predictions), 2)
         with self.assertRaises(ValueError):
             SessionLog(**common, predictions=[{"output": "stop"}])
+
+
+class GeneratedQuestionTest(unittest.TestCase):
+    def test_rule_terms_are_allowed_but_state_claims_are_not(self):
+        self.assertTrue(valid_question("要求ONの部屋が両方あるとき、どちらを選ぶ理由を説明できますか？"))
+        self.assertTrue(valid_question("要求OFFに戻す条件は、どの情報を見て決めましたか？"))
+        self.assertTrue(valid_question("要求ON/OFFの条件は、どの情報を見て決めましたか？"))
+        self.assertFalse(valid_question("A室の換気要求はONなので、待ち時間をどう考えますか？"))
+        self.assertFalse(valid_question("待ち時間を見たよ。濃度も見たよ。継続も見たよ。点検も見たよ。どっちが大事？"))
+        self.assertFalse(valid_question("ぼくは高濃度への対応を重視するようにしたんだ。？"))
+        self.assertFalse(valid_question("全体では6分しかsembuしていないけど、問題ある？", allowed_numbers={"6"}))
+        self.assertTrue(valid_question("1,000ppmを超えたら要求ONにしたけど、どう思う？"))
+        self.assertTrue(valid_question("800以下で要求をOFFにする理由って何？"))
+        self.assertFalse(valid_question("A室はOFFになってるけど、なんで？"))
+
+    def test_rule_terms_survive_cleanup_and_lines_are_joined_with_a_period(self):
+        self.assertEqual(normalize_question("要求ON/OFFの条件はどう決めた？"), "要求ON/OFFの条件はどう決めた？")
+        self.assertTrue(valid_question(normalize_question("要求ON/OFFの条件はどう決めた？")))
+        self.assertEqual(normalize_question("濃度を先にした\nどうして待ち時間を先にしたの？"), "濃度を先にした。どうして待ち時間を先にしたの？")
+
+    def test_facilitator_alternates_between_the_two_question_types(self):
+        captured = []
+        class Fake:
+            def chat(self, messages, options):
+                captured.append(messages[0].content)
+                return LLMResult(text="この自習室ならどっちが合ってると思う？", provider="fake", model="f", elapsed_ms=1)
+        history = [{"role": "ai", "speaker": "司会役", "phase": 4, "text": "あいさつ"}]
+        kinds = []
+        with patch("ventilation_service.create_llm_client", return_value=Fake()):
+            for _ in range(3):
+                captured.clear()
+                req = AdviceRequest.model_validate({"program": Program().model_dump(), "phase": 4, "focus_plan": "group_a", "history": history})
+                turns = list(generate_discussion(req))
+                kinds.append("compare" if "共通点" in captured[-1] else "purpose")
+                history += [{"role": turn["role"], "speaker": turn["speaker"], "phase": 4, "text": turn["text"]} for turn in turns]
+        self.assertEqual(kinds, ["compare", "purpose", "compare"])
+
+    def test_learner_is_called_you_in_visible_fallbacks(self):
+        with patch.dict(os.environ, {"LLM_PROVIDER": "fallback"}):
+            req = AdviceRequest.model_validate({"program": Program().model_dump(), "phase": 4, "focus_plan": "learner"})
+            texts = [turn["text"] for turn in generate_discussion(req)]
+        self.assertTrue(any("あなたの案" in text for text in texts))
+        self.assertFalse(any("学習者" in text for text in texts))
+
+    def test_copied_labels_and_extra_questions_are_cleaned(self):
+        raw = "自分の考えや迷い: 濃度を先に見たけど迷ってる。\n相手への問い: 待ち時間はどう考えた？？それとも濃度だけ？"
+        self.assertEqual(normalize_question(raw), "濃度を先に見たけど迷ってる。待ち時間はどう考えた？")
+        self.assertTrue(valid_question(normalize_question(raw)))
+        self.assertEqual(normalize_question("司会役: この自習室ならどっちが合ってると思う？"), "この自習室ならどっちが合ってると思う？")
+        self.assertFalse(valid_question("その結果、B室が放置されたのは理解できますか？"))
+
+    def test_peer_utterances_reject_teacher_talk_and_unsupported_numbers(self):
+        self.assertTrue(valid_question("ぼくは濃度を先に見たんだ。そっちはどうして待ち時間を先にしたの？"))
+        self.assertFalse(valid_question("いい質問ですね、待ち時間はどう考えますか？"))
+        self.assertFalse(valid_question("待ち時間のルールを上に移してみましょう、どう思う？"))
+        self.assertFalse(valid_question("B室が5分放置されるのはどうして？"))
+        self.assertTrue(valid_question("B室が5分放置されるのはどうして？", allowed_numbers={"5"}))
+        self.assertTrue(valid_question("1,500ppmの部屋を先にするのはなぜ？", allowed_numbers={"1500"}))
+
+    def test_repeated_question_marks_are_collapsed(self):
+        self.assertEqual(normalize_question("「どの情報を参照していますか？？」"), "どの情報を参照していますか？")
+        self.assertTrue(valid_question(normalize_question("どの部屋を優先するか、決め手は何ですか？？")))
+
+
+class PeerDialogueTest(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_first_problem_points_to_a_concrete_minute(self):
+        self.assertIn("テストケース3", first_problem(goal_example_program("group_a")))
+        self.assertIn("分目", first_problem(goal_example_program("group_a")))
+        self.assertIsNone(first_problem(goal_example_program("group_b")))
+        self.assertIn("すべて", plan_facts(goal_example_program("group_b")))
+
+    def test_plans_are_served_only_on_request_and_only_known_ids(self):
+        cards = self.client.get("/api/ventilation/plans", params={"ids": "group_a,group_c"}).json()
+        self.assertEqual([card["id"] for card in cards], ["group_a", "group_c"])
+        self.assertIn("program", cards[0])
+        self.assertFalse(cards[0]["results"]["all_met"])
+        self.assertEqual(self.client.get("/api/ventilation/plans", params={"ids": "learner"}).status_code, 422)
+
+    def test_pair_partner_talks_about_a_difference_between_plans(self):
+        with patch.dict(os.environ, {"LLM_PROVIDER": "fallback"}):
+            body = {"program": goal_example_program("group_b").model_dump(), "phase": 2, "pair_plan": "group_a"}
+            data = self.client.post("/api/ventilation/advice", json=body).json()
+        self.assertIsNone(data["facts"])
+        self.assertIn("違う", data["message"])
+        differences = program_differences(goal_example_program("group_b"), goal_example_program("group_a"))
+        self.assertIn(differences[0]["stage_name"], data["message"])
+
+    def test_pair_partner_never_holds_the_plan_that_meets_every_case(self):
+        body = {"program": Program().model_dump(), "phase": 2, "pair_plan": "group_b"}
+        self.assertEqual(self.client.post("/api/ventilation/advice", json=body).status_code, 422)
+
+    def test_choice_logs_keep_the_selected_plan_and_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("ventilation_service.LOG_FILE", Path(directory) / "logs.jsonl"):
+                record = append_log(SessionLog(task_id="ventilation-goals-v3", program=Program(), session_id="s", event_id="c",
+                                               event="choice", choice={"stage": "before", "plan": "group_c", "reason": "継続が大事"}))
+        self.assertEqual(record["choice"]["plan"], "group_c")
 
 
 class AllCasesTest(unittest.TestCase):

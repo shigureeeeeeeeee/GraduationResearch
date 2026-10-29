@@ -26,7 +26,7 @@ async function scrollToBottom() {
 
 function speakerName(message) {
   if (message.speaker) return message.speaker
-  if (message.role === 'ai') return props.groupPhase ? '司会AI' : 'AI'
+  if (message.role === 'ai') return props.groupPhase ? '司会役' : 'ペア'
   return props.groupPhase ? '自分の意見' : 'あなた'
 }
 
@@ -42,10 +42,10 @@ defineExpose({ scrollToBottom })
 
 <template>
   <section v-if="!visible" class="panel panel-chat-placeholder">
-    <div class="placeholder-title">AI との対話</div>
+    <div class="placeholder-title">ペアとの対話</div>
     <div class="placeholder-text">
       まずは<strong>自分だけで</strong>プログラムを考えてみよう。<br>
-      「次のフェーズへ進む」を押すと、AIと話し合えるようになるよ。
+      「次のフェーズへ進む」を押すと、同じ課題に取り組むペア（AI）と話せるようになるよ。
     </div>
   </section>
 
@@ -53,7 +53,7 @@ defineExpose({ scrollToBottom })
     <h2 class="panel-title">{{ title }}</h2>
     <p class="panel-desc">{{ description }}</p>
 
-    <div v-if="groupPhase" class="group-discussion-panel">
+    <div v-if="groupPhase && groupExamples.length" class="group-discussion-panel">
       <div class="group-panel-title">討論に参加する3つのAIグループ</div>
       <p class="group-panel-desc">{{ groupDescription }}</p>
       <div class="group-example-list">
@@ -68,21 +68,27 @@ defineExpose({ scrollToBottom })
     </div>
 
     <div class="chat-window">
-      <div
-        v-for="message in messages"
-        :key="message.id"
-        class="chat-bubble"
-        :class="[
-          message.role === 'ai' ? 'bubble-ai' : (message.role === 'group' ? 'bubble-group' : 'bubble-user'),
-          message.agentId ? `bubble-${message.agentId}` : '',
-        ]"
-      >
-        <div class="bubble-avatar">{{ speakerName(message) }}</div>
-        <div class="bubble-text">{{ message.text }}<small v-if="message.llm?.fallback" class="fallback-label">ルールベースの補助応答</small></div>
-      </div>
+      <template v-for="message in messages" :key="message.id">
+        <!-- 実行結果などの事実はシステムが計算したもので、仲間の発言とは分けて示す -->
+        <div v-if="message.role === 'system'" class="chat-facts">
+          <span>{{ message.speaker || '実行結果' }}（システムが計算）</span>
+          <p>{{ message.text }}</p>
+        </div>
+        <div
+          v-else
+          class="chat-bubble"
+          :class="[
+            message.role === 'ai' ? 'bubble-ai' : (message.role === 'group' ? 'bubble-group' : 'bubble-user'),
+            message.agentId ? `bubble-${message.agentId}` : '',
+          ]"
+        >
+          <div class="bubble-avatar">{{ speakerName(message) }}</div>
+          <div class="bubble-text">{{ message.text }}<small v-if="message.llm?.fallback" class="fallback-label">ルールベースの補助応答</small></div>
+        </div>
+      </template>
       <div v-if="loading" class="chat-bubble bubble-ai loading-bubble">
-        <div class="bubble-avatar">{{ groupPhase ? '司会AI' : 'AI' }}</div>
-        <div class="bubble-text">{{ groupPhase ? 'A・B・Cグループで話し合い中' : '考え中' }}<span class="dots">...</span></div>
+        <div class="bubble-avatar">{{ groupPhase ? 'みんな' : 'ペア' }}</div>
+        <div class="bubble-text">{{ groupPhase ? 'みんなが話しています' : '考え中' }}<span class="dots">...</span></div>
       </div>
       <div ref="endRef" />
     </div>

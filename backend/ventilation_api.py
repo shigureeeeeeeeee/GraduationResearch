@@ -1,6 +1,6 @@
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from ventilation_content import public_config
@@ -24,6 +24,15 @@ def run_simulation(req: SimulationRequest):
 @router.post("/simulate-all")
 def run_all_cases(req: AllCasesRequest):
     return service.simulate_all(req.program)
+
+
+@router.get("/plans")
+def plans(ids: str = Query(...)):
+    # グループの案は設定に含めず、フェーズ2・4で必要なものだけ返す（全テストケースで達成するB案を最初から渡さないため）
+    requested = [plan_id for plan_id in ids.split(",") if plan_id]
+    if not requested or any(plan_id not in ("group_a", "group_b", "group_c") for plan_id in requested):
+        raise HTTPException(status_code=422, detail="unknown plan id")
+    return service.plan_cards(requested)
 
 
 @router.post("/advice")

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from llm_clients import GenerationOptions, LLMMessage, create_llm_client
 from ventilation_content import GROUPS, SCENARIOS, TASK_ID, TASK_SPEC, goal_example_program
+from ventilation_describe import program_differences, program_text
 from ventilation_engine import OUTPUT_LABELS, simulate
 from ventilation_models import PromptsConfig, TestInput
 
@@ -15,10 +16,10 @@ PROMPT_FILE = DATA_DIR / "ventilation_numeric_goals_prompts.json"
 LOG_FILE = DATA_DIR / "ventilation_sessions.jsonl"
 LOG_LOCK = Lock()
 DEFAULT_PROMPTS = {
-    "base": "あなたは大学生のプログラミング学習の対話相手です。2室の換気制御について、省察を促してください。唯一の正解を想定せず、目的・制限・判断の根拠を検討してください。渡されたプログラムと実行履歴を読み、ルールを聞き返さず、具体的な場面に触れてください。完成プログラムを提示せず、予想・根拠・反例について最後に問いを1つ出してください。応答は短く、日本語で完結させてください。時間は「ステップ」と言わず「分」で表してください。",
-    "phase2_extra": "ペアの友達として、条件を選んだ理由や、別の状況でどうなるかを一緒に考えてください。",
-    "phase3_extra": "実際の動作、制約違反、未対応時間や必要のない運転を検討してください。異なる優先順位を誤りと断定せず、複数の目的の間のトレードオフと判断の根拠を尋ねてください。",
-    "phase4_extra": "全体対話の司会として、A・B・Cグループの根拠を比較してください。提示された事実に基づき、学習者の案を見直す問いを1つ出してください。新しい架空のグループ発言を作らないでください。",
+    "base": "あなたは学習者と同じ大学の授業で、同じ換気制御の課題に取り組んでいる学生です。教師・先生・チューターではありません。知識や力は学習者と同じくらいで、正解も知りません。友達同士の話し言葉で、短く話してください。相手の考えを評価したり、ほめたり、指示や助言をしたりしないでください。自分の考えや迷いを1つ言ってから、相手の理由を1つだけ尋ねてください。実行結果の数値はシステムが別に表示するので、繰り返さないでください。完成プログラムや正解を示さないでください。時間は「ステップ」と言わず「分」で表してください。",
+    "phase2_extra": "あなたはペアの相手で、自分の案を持っています。自分の案と相手の案の違いを1つ選び、自分がそうした理由を短く言ってから、相手がそうした理由を尋ねてください。自分の案が正しいとは限りません。",
+    "phase3_extra": "あなたはペアの相手で、実行結果を一緒に見ています。気になった場面を1つ挙げ、相手がどう考えるか尋ねてください。違う優先順位を誤りと決めつけないでください。",
+    "phase4_extra": "あなたはクラス全体の話し合いに参加している学生の一人です。今話している案について、具体的な場面をもとに話してください。",
 }
 
 
@@ -106,23 +107,26 @@ def system_prompt(phase):
     return prompts["base"] + "\n" + prompts.get(f"phase{phase}_extra", prompts["phase2_extra"]) + "\n【教材の目的・制限・観測指標】\n" + TASK_SPEC
 
 
-def fallback_advice(req):
+def fallback_advice(req, differences=None):
+    # LLMが使えないときの仲間の発言。評価や指示をせず、自分の迷いと問いだけにする
+    if differences:
+        return f"ぼくの案とは{differences[0]['stage_name']}のところが違うみたい。そこはどうしてそうしたの？"
     result = simulate(req.program, req.steps)
     if not any((req.program.demand, req.program.selection, req.program.output)):
-        return "どんな状況を換気が必要と考え、両方の部屋が必要なときは何を優先したい？"
+        return "ぼくもまだ迷ってるんだけど、どんなときに換気が必要だと思う？"
     if result["metrics"]["violation_steps"]:
-        return "使われたルールと装置の制限を比べると、どの判断を見直したい？"
+        return "装置の制限のところ、ぼくもよく分かってないんだけど、どのルールが効いてると思う？"
     if req.steps and not result["achievement"]["all_met"]:
-        return "達成基準を超えた指標について、使われたルールのどこを見直したい？"
+        return "ぼくも同じところで迷ってるんだけど、どのルールを変えたらいいと思う？"
     if req.steps:
-        return "濃度への対応と待ち時間を比べると、自分の案は何を優先し、どんな場面で見直したい？"
-    return "自分の優先方針がうまく働く場面と、働かないかもしれない場面をどう確かめたい？"
+        return "ぼくは高い濃度と待ち時間のどっちを先にするか迷ってるんだけど、どっちを大事にした？"
+    return "ぼくはまだ自信ないんだけど、この案だとうまくいかない場面ってありそう？"
 
 
 def advice_evidence(req):
     result = simulate(req.program, req.steps, baseline=req.baseline)
     if not req.steps:
-        return "今のプログラムはまだ実行されていません。テストケースを選んで実行し、動きを確かめてみましょう。"
+        return "まだ実行していません。"
     m = result["metrics"]
     lines = [f"実行した{len(req.steps)}分のうち、制約違反は{m['violation_steps']}分でした。",
              f"有人かつ濃度の目安以上の部屋への対応は{m['served_room_steps']} / {m['needs_room_steps']}分、未対応は延べ{m['unserved_room_steps']}分です。",
@@ -136,39 +140,71 @@ def advice_evidence(req):
     first = next((row for row in result["trace"] if row["violations"]), None)
     if first:
         lines.append(f"{first['step']}分目の動作は「{OUTPUT_LABELS[first['after']['output']]}」です。" + " ".join(first["violations"]))
-    lines.append("達成状況はこの実行範囲に限ります。停止制限の時間も未対応に含めます。改善指標は同じ入力で修正前後を比べましょう。")
+    lines.append("達成状況はこの実行範囲に限ります。停止制限の時間も未対応に含めます。")
     return "\n".join(lines)
 
 
-QUESTION_INSTRUCTION = """
-【今回生成する部分】
-制約違反と目的に関する観測指標は、システムが計算済みの文章で表示します。
-あなたは対話の流れを踏まえ、学習者の予想・理由・比較を促す問いを1文だけ生成してください。
-実行結果や原因を新たに説明・断定しないでください。数値、ON/OFF、正誤判定を出力しないでください。
-待ち時間などの指標は、原因や不足している条件を断定するものではありません。「考慮されていない理由」など、未確認の不足を前提にした問いは避け、「どの情報を参照しているか」を尋ねてください。
-見出しや前置きなし、120文字以内の日本語の質問1つだけを出力し、必ず「？」で終えてください。
+PEER_INSTRUCTION = """
+【出力の形】
+見出し・前置き・箇条書き・改行なしで、120文字以内の話し言葉にしてください。自分の考えか迷いを短く言い、最後に相手への質問を1つだけ書いて「？」で終えてください。
+教師のように評価・指示・まとめをしないでください（「いいですね」「〜しましょう」「〜してください」などは使わない）。
+渡された事実にない数値や、ON/OFFの状態、正誤の判定は書かないでください（ルールの用語として「要求ON」「要求OFF」と書くのはかまいません）。
 A・B・Cグループは発言者、A・B室は換気の対象です。混同しないでください。
 """
+# 仲間の発言として使わない言葉。教師的な評価・指示と、旧課題の語
+TEACHER_TERMS = ("しましょう", "ましょう", "ください", "いいですね", "いい質問", "素晴らし", "すばらし", "よくでき", "正解", "間違い",
+                 "正当", "仕様どおり", "ヒント", "先生", "理解できますか", "分かりますか", "わかりますか", "考慮されていない", "考慮していない", "コンビニ", "チャイム", "人感センサー")
 
 
-def valid_question(text):
-    # Restrict generated text to a question; simulation facts are supplied by code.
-    return (10 <= len(text) <= 180 and text.endswith(("?", "？"))
+def numbers_in(text):
+    text = text.translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+    return {number.replace(",", "") for number in re.findall(r"\d[\d,]*", text)}
+
+
+# 課題文に出てくる基準の数字。事実として渡していなくても、AIが口にしてよい
+TASK_NUMBERS = {"800", "1000", "1500", "4", "2", "1"}
+LABEL_PATTERN = re.compile(r"(自分の考えや迷い|自分の考え|考え|迷い|相手への問い|相手への質問|問い|質問|司会役|[ABC]グループ|ペア)\s*[:：]\s*")
+
+
+def normalize_question(text):
+    """Clean up common small-model habits before validation.
+
+    Removes copied format labels ("迷い: ..."), joins lines, collapses "？？", and keeps only up to the first question.
+    """
+    text = LABEL_PATTERN.sub("", text.strip().strip('"「」'))
+    # 区切りは改行と、前後に空白のある「 / 」だけ。「要求ON/OFF」のスラッシュは残す。つなぐときは句点を補う
+    text = re.sub(r"(?<=[^。？！?、])\s*(?:\n+|\s+/\s+)\s*", "。", text)
+    text = re.sub(r"\s*(?:\n+|\s+/\s+)\s*", "", text).replace("?", "？")
+    text = re.sub(r"？{2,}", "？", text).strip('"「」 ')
+    return text[:text.index("？") + 1] if "？" in text else text
+
+
+def valid_question(text, allowed_numbers=()):
+    """A peer utterance: a few short statements and then one question, with no teacher-like or unsupported claims."""
+    # 「要求ON/OFF」はルール画面の用語なので許し、状態の断定になりうる単独のON/OFFだけを弾く
+    # 「要求をOFFにする」はルールの動作なので許す。「要求はON」のような状態の言い切りは弾く
+    plain = re.sub(r"要求を?(ON|OFF)([/／・](ON|OFF))?", "", text)
+    question = re.split(r"[。！]", text)[-1]
+    return (10 <= len(text) <= 160 and text.endswith(("?", "？"))
             and text.count("?") + text.count("？") == 1
-            and not re.search(r"[0-9０-９]", text)
-            and not any(term in text for term in ("。", "！", "\n", "ON", "OFF", "正当", "正解", "間違い", "仕様どおり", "考慮されていない", "考慮していない", "コンビニ", "チャイム", "人感センサー")))
+            and len(question) >= 5
+            and text.count("。") <= 3 and text.count("！") <= 1 and "\n" not in text
+            and numbers_in(text) <= set(allowed_numbers) | TASK_NUMBERS
+            and not re.search(r"(?!ppm)[a-z]{3,}", text)
+            and not any(term in plain for term in ("ON", "OFF"))
+            and not any(term in text for term in TEACHER_TERMS))
 
 
-def respond(messages, fallback, role=None, max_tokens=180):
+def respond(messages, fallback, role=None, max_tokens=180, allowed_numbers=()):
     metadata = {"provider": "fallback", "model": "rule-based", "elapsed_ms": 0, "fallback": True}
     try:
-        messages = [LLMMessage(role=msg.role, content=msg.content + (QUESTION_INSTRUCTION if msg.role == "system" else "")) for msg in messages]
+        messages = [LLMMessage(role=msg.role, content=msg.content + (PEER_INSTRUCTION if msg.role == "system" else "")) for msg in messages]
         client = create_llm_client(role=role)
         result = client.chat(messages, GenerationOptions(temperature=0.45, max_tokens=max_tokens))
         metadata = {"provider": result.provider, "model": result.model,
                     "elapsed_ms": result.elapsed_ms, "fallback": False}
-        text = re.sub(r"[?？]+$", "？", result.text.strip().strip('"「」'))
-        if not valid_question(text):
+        text = normalize_question(result.text)
+        if not valid_question(text, allowed_numbers):
             raise ValueError("Response does not match the task")
         return text, metadata
     except Exception:
@@ -176,47 +212,162 @@ def respond(messages, fallback, role=None, max_tokens=180):
         return fallback, metadata
 
 
+def chat_history(req, limit):
+    # システムが示した事実の枠は、会話の発言としてはLLMに渡さない
+    return [msg for msg in req.history if msg.role != "system"][-limit:]
+
+
 def generate_advice(req):
-    messages = [LLMMessage(role="system", content=system_prompt(req.phase))]
-    messages += [LLMMessage(role="user" if msg.role == "user" else "assistant", content=msg.text)
-                 for msg in req.history[-10:]]
-    messages.append(LLMMessage(role="user", content=context_for(req) + "\n学習者の発言: " + (req.current_message or "今のプログラムを一緒に検討したい。")))
-    text, metadata = respond(messages, fallback_advice(req))
-    return {"message": advice_evidence(req) + "\n\n" + text, "llm": metadata}
+    system = system_prompt(req.phase)
+    differences = None
+    if req.pair_plan:
+        pair = goal_example_program(req.pair_plan)
+        differences = program_differences(req.program, pair)
+        group = next(item for item in GROUPS if item["id"] == req.pair_plan)
+        system += (f"\n【あなた（ペア）の案：{group['title']}】\n{program_text(pair)}"
+                   f"\n【相手の案】\n{program_text(req.program)}"
+                   "\n【2つの案の違い】\n" + ("\n".join(
+                       f"{d['stage_name']}: 相手だけ「{' / '.join(d['only_mine']) or 'なし'}」、あなただけ「{' / '.join(d['only_theirs']) or 'なし'}」"
+                       + ("（並び順だけが違う）" if d["order_only"] else "") for d in differences) or "ルールは同じ"))
+    messages = [LLMMessage(role="system", content=system)]
+    messages += [LLMMessage(role="user" if msg.role == "user" else "assistant", content=msg.text) for msg in chat_history(req, 10)]
+    messages.append(LLMMessage(role="user", content=context_for(req) + "\n相手の発言: " + (req.current_message or "今の案について話そう。")))
+    # 自分の案や相手の案に書かれている数字（「待ち時間 ≥ 3」など）は事実として口にしてよい
+    allowed = numbers_in(program_text(req.program)) | (numbers_in(program_text(goal_example_program(req.pair_plan))) if req.pair_plan else set())
+    text, metadata = respond(messages, fallback_advice(req, differences), allowed_numbers=allowed)
+    return {"facts": advice_evidence(req) if req.steps else None, "message": text, "llm": metadata}
 
 
-def group_evidence(group):
-    scenario = next(s for s in SCENARIOS if s["id"] == group["scenario"])
-    result = simulate(goal_example_program(group["id"]), [TestInput.model_validate(s) for s in scenario["steps"]])
-    m = result["metrics"]
-    return (f"私たちの案を「{scenario['label']}」で実行しました。"
-            f"制約違反は{m['violation_steps']}分、目安以上の部屋への未対応は延べ{m['unserved_room_steps']}分、"
-            f"参考待ち時間の最大値はA室{m['max_wait']['A']}・B室{m['max_wait']['B']}です。"
-            f"無人・800ppm以下への運転は{m['unnecessary_ventilation_steps']}回でした。"
-            f"このテストケースでの数値基準は{'達成' if result['achievement']['all_met'] else '未達'}です。"
-            f"1,500ppm以上の未対応は延べ{m['urgent_unserved_room_steps']}分でした。")
+# ---- フェーズ4：案を1つずつ話し合う ----
+
+PLAN_IDS = ("group_a", "group_b", "group_c", "learner")
+FACILITATOR = {"speaker": "司会役", "agent_id": "facilitator"}
+
+
+def plan_program(req, plan_id):
+    return req.program if plan_id == "learner" else goal_example_program(plan_id)
+
+
+def plan_name(plan_id, for_learner=True):
+    # 画面では「あなたの案」。AIへの指示では、AI自身の案と取り違えないよう「学習者の案」と呼ぶ
+    if plan_id == "learner":
+        return "あなたの案" if for_learner else "学習者の案"
+    group = next(item for item in GROUPS if item["id"] == plan_id)
+    return f"{group['group']}の案"
+
+
+def first_problem(program):
+    """The first place, in test-case order, where the program misses a goal. None if every case is met."""
+    for scenario in SCENARIOS:
+        result = simulate(program, [TestInput.model_validate(step) for step in scenario["steps"]])
+        for row in result["trace"]:
+            where = f"「{scenario['label']}」の{row['step']}分目"
+            if row["violations"]:
+                return f"{where}に、装置の制限を破る（{row['violations'][0].rstrip('。')}）"
+            output = row["after"]["output"]
+            if output != "stop":
+                occupied = row["input"][output.lower() + "Occupied"]
+                co2 = row["input"][output.lower() + "Co2"]
+                if not occupied or co2 <= 800:
+                    return f"{where}に、{'無人の' if not occupied else f'{co2}ppmの'}{output}室を換気する"
+            for room, wait in row["observation"]["goal_wait"].items():
+                if wait > 4:
+                    return f"{where}に、{room}室が{wait}分続けて放置される"
+    return None
+
+
+def plan_facts(program):
+    problem = first_problem(program)
+    if problem:
+        return problem + "。"
+    summary = simulate_all(program)
+    worst = max(summary["cases"], key=lambda case: case["urgent_unserved"])
+    total = sum(case["urgent_unserved"] for case in summary["cases"])
+    if not total:
+        return "8つのテストケースすべてで目的を達成し、1,500ppm以上の部屋の放置もない。"
+    return (f"8つのテストケースすべてで目的を達成する。1,500ppm以上の部屋の放置は合計{total}分"
+            f"（いちばん多いのは「{worst['label']}」の{worst['urgent_unserved']}分）。")
+
+
+def plan_cards(plan_ids):
+    """Programs and test results for the plans the board shows. Served only when a phase needs them."""
+    cards = []
+    for plan_id in plan_ids:
+        group = next(item for item in GROUPS if item["id"] == plan_id)
+        program = goal_example_program(plan_id)
+        cards.append({"id": plan_id, "group": group["group"], "title": group["title"],
+                      "program": program.model_dump(), "results": simulate_all(program)})
+    return cards
+
+
+def critic_for(focus):
+    # 指摘する仲間：グループの案なら次のグループ、学習者の案ならAグループ
+    order = ["group_a", "group_b", "group_c"]
+    return order[(order.index(focus) + 1) % 3] if focus in order else "group_a"
+
+
+def group_speaker(group_id):
+    group = next(item for item in GROUPS if item["id"] == group_id)
+    return {"speaker": group["group"], "agent_id": group_id}
 
 
 def generate_discussion(req):
-    context = context_for(req)
-    history = "\n".join(f"{msg.speaker or msg.role}: {msg.text}" for msg in req.history[-12:])
+    """One round of the class discussion about req.focus_plan, streamed turn by turn."""
+    focus = req.focus_plan or "learner"
+    program = plan_program(req, focus)
+    facts = plan_facts(program)
+    allowed = numbers_in(facts) | numbers_in(program_text(program))
+    name = plan_name(focus, for_learner=False)
+    shown = plan_name(focus)
+    owner = None if focus == "learner" else focus
+    critic = critic_for(focus)
+    history = "\n".join(f"{msg.speaker or msg.role}: {msg.text}" for msg in chat_history(req, 12))
+    base = (system_prompt(4) + f"\n【今話している案：{name}】\n{program_text(program)}\n【システムが確かめた事実】{facts}"
+            + ("\n学習者に話しかけるときは「あなた」と呼び、この案は「あなたの案」と言ってください。" if focus == "learner"
+               else f"\nこの案は「{name}」と呼んでください。「あなたの案」とは言わないでください（学習者の案と取り違えるため）。"))
+    max_tokens = int(os.environ.get("GROUP_MAX_TOKENS", "180"))
     turns = []
-    for group in GROUPS:
-        evidence = group_evidence(group)
-        current = "\n".join(f"{turn['speaker']}: {turn['text']}" for turn in turns)
-        messages = [
-            LLMMessage(role="system", content=system_prompt(4) + f"\nあなたは{group['group']}です。司会ではありません。あなたの案: {' '.join(group['rules'])}\n確認済みの実行結果: {evidence}\n実行結果はシステムが別に表示します。繰り返さず、前の発言との共通点・相違点を1〜2文で述べてください。"),
-            LLMMessage(role="user", content=f"学習者の状態: {context}\n過去の対話: {history}\n今回の先行発言: {current}\n学習者: {req.current_message or 'それぞれの案を比べたい。'}"),
-        ]
-        reaction, metadata = respond(messages, group["question"], role=group["id"],
-                                     max_tokens=int(os.environ.get("GROUP_MAX_TOKENS", "180")))
-        turn = {"role": "group", "speaker": group["group"], "agent_id": group["id"],
-                "text": evidence + "\n" + reaction, "llm": metadata}
-        turns.append(turn)
-        yield turn
-    messages = [LLMMessage(role="system", content=system_prompt(4)),
-                LLMMessage(role="user", content=f"学習者の状態: {context}\n学習者: {req.current_message or '案を比べたい。'}\n今回の発言: " + json.dumps(turns, ensure_ascii=False))]
-    text, metadata = respond(messages, "自分の案で重視した目的と、ほかの案で重視した目的を比べると、どの場面を確かめたいですか？", role="facilitator",
-                             max_tokens=int(os.environ.get("FACILITATOR_MAX_TOKENS", "220")))
-    summary = "各案は濃度、待ち時間、運転の継続をそれぞれ重視しています。数値基準を満たしたか確認し、同じ入力で高濃度の未対応時間と判断の根拠を比べましょう。"
-    yield {"role": "ai", "speaker": "司会AI", "agent_id": "facilitator", "text": summary + "\n" + text, "llm": metadata}
+
+    if not req.current_message:
+        turns.append({"role": "system", "speaker": "実行結果", "agent_id": "system", "text": f"{plan_name(focus)}：{facts}"})
+        yield turns[-1]
+        target = f"{group_speaker(owner)['speaker']}" if owner else "学習者"
+        messages = [LLMMessage(role="system", content=base + f"\nあなたは{group_speaker(critic)['speaker']}の学生です。事実の場面をもとに、{name}で気になるところを仲間として短く言い、{target}にどう考えるか尋ねてください。"),
+                    LLMMessage(role="user", content=f"これまでの話: {history}")]
+        text, metadata = respond(messages, f"{shown}だと、さっきの場面がちょっと気になったんだけど、どう考えてた？", role=critic,
+                                 max_tokens=max_tokens, allowed_numbers=allowed)
+        turns.append({"role": "group", **group_speaker(critic), "text": text, "llm": metadata})
+        yield turns[-1]
+
+    # 案を作ったグループが答える。学習者の案に学習者が発言したときは、指摘したグループが受け答えする
+    responder = owner or (critic if req.current_message else None)
+    if responder:
+        said = "\n".join(f"{turn['speaker']}: {turn['text']}" for turn in turns if turn["role"] != "system")
+        reply_to = f"学習者の発言「{req.current_message}」" if req.current_message else "今の指摘"
+        role_text = ("この案を作った本人です。" + reply_to + "に、自分たちがこの優先順位にした理由を短く言って答え、相手の考えを尋ねてください。認められるところは認めてかまいません。"
+                     if responder == owner else
+                     reply_to + "を聞いて、自分の考えを短く言い、相手にもう一歩たずねてください。")
+        messages = [LLMMessage(role="system", content=base + f"\nあなたは{group_speaker(responder)['speaker']}の学生です。{role_text}"),
+                    LLMMessage(role="user", content=f"これまでの話: {history}\n今回の発言: {said}")]
+        fallback = ("ぼくたちは濃度か待ち時間のどっちかを先に決めたかったんだけど、そっちならどうする？" if responder == owner
+                    else "なるほど、そう考えたんだね。じゃあ、その案だと困る場面ってありそう？")
+        text, metadata = respond(messages, fallback, role=responder, max_tokens=max_tokens, allowed_numbers=allowed)
+        turns.append({"role": "group", **group_speaker(responder), "text": text, "llm": metadata})
+        yield turns[-1]
+
+    # 司会役の問いは2種類だけ：違いを整理して目的に戻す／目的そのものを問う
+    # 司会役の発言の数で交互にする（フェーズ4の最初のあいさつも1回と数えるので、最初の問いは「比べる」になる）
+    facilitator_turns = sum(1 for msg in req.history if msg.role == "ai" and msg.speaker == FACILITATOR["speaker"] and msg.phase == 4)
+    if facilitator_turns % 2 == 1:
+        other = "group_b" if focus != "group_b" else "group_a"
+        kind = f"{name}と{plan_name(other)}の共通点と違いを一言で整理し、この自習室の目的にはどちらが合うと思うか、学習者に尋ねてください。"
+        fallback = f"{shown}と{plan_name(other)}って、先に見るものが違うよね。この自習室ならどっちが合ってると思う？"
+    else:
+        kind = "そもそも、なぜその目的（人のいる部屋を長く放置しない、ムダに動かさない）が必要なのかを、学習者に尋ねてください。"
+        fallback = "そもそも、人のいる部屋を長く放置しないほうがいいのってなんでだろう？"
+    said = "\n".join(f"{turn['speaker']}: {turn['text']}" for turn in turns if turn["role"] != "system")
+    messages = [LLMMessage(role="system", content=base + f"\nあなたは話し合いの司会役をしている学生です。教師ではないので、まとめたり評価したりしません。司会役は自分の案を持たないので、自分の意見や好みは言わず、出た意見を一言つないでから問いを1つだけ出してください。{kind}"),
+                LLMMessage(role="user", content=f"これまでの話: {history}\n今回の発言: {said}\n学習者: {req.current_message or '（まだ発言なし）'}")]
+    text, metadata = respond(messages, fallback, role="facilitator",
+                             max_tokens=int(os.environ.get("FACILITATOR_MAX_TOKENS", "220")), allowed_numbers=allowed)
+    yield {"role": "ai", **FACILITATOR, "text": text, "llm": metadata}

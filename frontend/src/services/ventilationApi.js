@@ -19,6 +19,8 @@ async function request(path, body, { method = body === undefined ? 'GET' : 'POST
 export const fetchConfig = () => request('/config')
 export const simulate = (program, steps, baseline = null) => request('/simulate', { task_id: 'ventilation-goals-v3', program, steps, baseline })
 export const simulateAll = (program) => request('/simulate-all', { program })
+// グループの案（プログラムと全テストケースの結果）。フェーズ2・4で必要な分だけ取る
+export const fetchPlans = (ids) => request(`/plans?ids=${ids.join(',')}`)
 export const fetchAdvice = (payload, signal) => request('/advice', payload, { signal })
 export const saveSessionLog = (payload) => request('/log', payload)
 export const fetchLogs = () => request('/log/export')

@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from 'vue'
+import { ruleSummary as summarize } from '../ruleText'
 
 const props = defineProps({
   modelValue: { type: Object, required: true },
@@ -13,7 +14,6 @@ const operators = [
   { value: 'gte', label: '以上 ≥' }, { value: 'gt', label: 'より大きい >' },
   { value: 'lte', label: '以下 ≤' }, { value: 'lt', label: 'より小さい <' },
 ]
-const opSymbol = { eq: '＝', ne: '≠', gte: '≥', gt: '>', lte: '≤', lt: '<' }
 const outputs = [{ value: 'A', label: 'A室' }, { value: 'B', label: 'B室' }, { value: 'stop', label: '停止' }]
 // 各段階の役割と、次の段階へ渡すもの
 const STAGE_GUIDE = {
@@ -71,28 +71,8 @@ function comparableFields(stage, field) {
   return stage.fields.filter((other) => other !== field && kind(field) === kind(other))
 }
 
-function conditionText(condition) {
-  const label = props.config.fields[condition.field].label
-  const other = condition.other_field && props.config.fields[condition.other_field].label
-  let text
-  if (kind(condition.field) === 'boolean' && !other) {
-    text = (condition.value === true) === (condition.op === 'eq') ? label : `${label}（いいえ）`
-  } else if (kind(condition.field) === 'output') {
-    text = `${label}${condition.op === 'eq' ? ' ＝ ' : ' ≠ '}${other || outputLabel(condition.value)}`
-  } else {
-    text = `${label} ${opSymbol[condition.op]} ${other || condition.value}`
-  }
-  return condition.negate ? `NOT（${text}）` : text
-}
 function ruleSummary(stage, rule) {
-  const action = stage.actions.find((item) => item.value === rule.action)?.label || ''
-  const joiner = rule.join === 'all' ? ' かつ ' : ' または '
-  const conditions = rule.conditions.map(conditionText).join(joiner)
-  if (stage.id === 'selection') {
-    return rule.conditions.length ? `要求ONの部屋のうち、${conditions} の部屋があれば → ${action}` : `要求ONの部屋があれば → ${action}`
-  }
-  if (!rule.conditions.length) return `いつでも → ${action}`
-  return `もし ${conditions} なら → ${action}`
+  return summarize(props.config, stage, rule)
 }
 
 // 直前の1分で、どのルールが使われ、各段階が何を決めたか

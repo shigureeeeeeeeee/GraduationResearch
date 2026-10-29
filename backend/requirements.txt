@@ -2,4 +2,6 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.0
 pydantic==2.11.1
 google-genai
+# Python 3.9 で使える最後の系統（1.x は 3.10 以上）
+anthropic==0.125.0
 python-dotenv==1.1.0

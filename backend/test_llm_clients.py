@@ -5,6 +5,8 @@ from unittest.mock import patch
 from llm_clients import (
     FallbackClient,
     GeminiClient,
+    GenerationOptions,
+    LLMMessage,
     OllamaClient,
     create_llm_client,
     resolve_llm_config,
@@ -75,6 +77,50 @@ class LLMConfigTest(unittest.TestCase):
 
         self.assertIsInstance(client, GeminiClient)
         self.assertEqual(client.model, "gemini-test")
+
+
+
+class AnthropicClientTest(unittest.TestCase):
+    def test_messages_are_shaped_into_alternating_turns_starting_with_user(self):
+        from anthropic_client import to_anthropic_messages
+        system, turns = to_anthropic_messages([
+            LLMMessage("system", "仲間として話す"), LLMMessage("system", "出力の形"),
+            LLMMessage("assistant", "ぼくも作ってみたよ"), LLMMessage("user", "待ち時間を先にした"), LLMMessage("user", "どう思う？"),
+        ])
+        self.assertEqual(system, "仲間として話す\n\n出力の形")
+        self.assertEqual([turn["role"] for turn in turns], ["user", "assistant", "user"])
+        self.assertIn("どう思う？", turns[-1]["content"])
+
+    def test_request_sends_no_sampling_parameters_and_reads_text(self):
+        from types import SimpleNamespace
+        from anthropic_client import AnthropicClient
+        calls = []
+        class FakeMessages:
+            def create(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(stop_reason="end_turn", usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+                                       content=[SimpleNamespace(type="text", text="ぼくは濃度を先にしたよ。そっちは？")])
+        client = AnthropicClient("claude-haiku-5-5", client=SimpleNamespace(messages=FakeMessages()))
+        result = client.chat([LLMMessage("system", "s"), LLMMessage("user", "u")], GenerationOptions(temperature=0.45, max_tokens=180))
+        self.assertEqual(result.provider, "anthropic")
+        self.assertNotIn("temperature", calls[0])
+        self.assertEqual(calls[0]["model"], "claude-haiku-5-5")
+
+    def test_refusal_becomes_an_error_so_the_fallback_is_used(self):
+        from types import SimpleNamespace
+        from anthropic_client import AnthropicClient
+        class Refusing:
+            def create(self, **kwargs):
+                return SimpleNamespace(stop_reason="refusal", content=[], usage=SimpleNamespace(input_tokens=1, output_tokens=0))
+        client = AnthropicClient("claude-haiku-5-5", client=SimpleNamespace(messages=Refusing()))
+        with self.assertRaises(RuntimeError):
+            client.chat([LLMMessage("user", "u")], GenerationOptions())
+
+    def test_role_override_selects_claude_for_one_agent(self):
+        with patch.dict(os.environ, {"LLM_PROVIDER": "ollama", "OLLAMA_MODEL": "qwen2.5:7b-instruct",
+                                     "FACILITATOR_LLM_PROVIDER": "anthropic"}, clear=True):
+            self.assertEqual(resolve_llm_config("facilitator").model, "claude-haiku-5-5")
+            self.assertEqual(resolve_llm_config("group_a").provider, "ollama")
 
 
 if __name__ == "__main__":

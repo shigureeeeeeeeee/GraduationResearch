@@ -7,7 +7,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 
-SUPPORTED_PROVIDERS = ("gemini", "ollama", "fallback")
+SUPPORTED_PROVIDERS = ("gemini", "ollama", "anthropic", "fallback")
 
 
 @dataclass(frozen=True)
@@ -88,6 +88,8 @@ def resolve_llm_config(role: Optional[str] = None) -> LLMConfig:
         if not model:
             label = f"{prefix}_LLM_MODEL または " if prefix else ""
             raise ValueError(f"{label}OLLAMA_MODEL が未設定です")
+    elif provider == "anthropic":
+        model = role_model or os.environ.get("ANTHROPIC_MODEL", "claude-haiku-5-5")
     else:
         model = "rule-based"
 
@@ -242,6 +244,8 @@ def create_llm_client(
             selected_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
         elif selected_provider == "ollama":
             selected_model = os.environ.get("OLLAMA_MODEL", "")
+        elif selected_provider == "anthropic":
+            selected_model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-5-5")
         else:
             selected_model = "rule-based"
 
@@ -251,4 +255,8 @@ def create_llm_client(
         if not selected_model:
             raise ValueError("OLLAMA_MODEL が未設定です")
         return OllamaClient(selected_model)
+    if selected_provider == "anthropic":
+        # 必要なときだけ読み込む（Claude を使わない環境では SDK がなくても動く）
+        from anthropic_client import AnthropicClient
+        return AnthropicClient(selected_model)
     return FallbackClient()
